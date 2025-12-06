@@ -21,14 +21,34 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+// health
 app.get("/", (req, res) => res.send("📚 Readers API running"));
 
+// mount routes (ensure each route file uses `export default router;`)
 app.use("/api/auth", authRoutes);
 app.use("/api/books", bookRoutes);
 app.use("/api/reading", readingRoutes);
 app.use("/api/search", searchRoutes);
-app.use("/api/auth", meRoutes);
+app.use("/api/me", meRoutes); // mount "me" endpoints at /api/mer
 
-connectDB().then(() => {
-  app.listen(PORT, () => console.log(`🚀 Server started on http://localhost:${PORT}`));
+// generic error handler
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  const status = err.status || 500;
+  const message = err.message || "Internal Server Error";
+  res.status(status).json({ message });
 });
+
+// start server after DB connected
+connectDB()
+  .then(() => {
+    app.listen(PORT, () =>
+      console.log(`🚀 Server started on http://localhost:${PORT}`)
+    );
+  })
+  .catch((err) => {
+    console.error("Failed to connect DB", err);
+    // decide: exit in production, but in dev we may want to keep process alive
+    process.exit(1); // keep this if you want the process to stop on DB failure
+    // OR: do not exit in dev — comment out the above line
+  });
