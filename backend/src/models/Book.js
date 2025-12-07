@@ -9,11 +9,10 @@ const BookSchema = new mongoose.Schema(
     cover: { type: String },
     source: { type: String, default: "openlibrary" },
     raw: { type: mongoose.Schema.Types.Mixed },
+    description: { type: String, default: null },
   },
   { timestamps: true }
 );
-
-// NOTE: no BookSchema.index(...) here — unique is defined inline above
 
 const Book = mongoose.models.Book || mongoose.model("Book", BookSchema);
 export default Book;
