@@ -17,6 +17,7 @@ import shelfRoutes from "./routes/shelf.routes.js";
 import smartShelfRoutes from "./routes/smartShelf.routes.js";
 import noteRoutes from "./routes/note.routes.js";
 import activityRoutes from "./routes/activity.routes.js";
+import profileRoutes from "./routes/profile.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -42,6 +43,7 @@ app.use("/api/shelves", shelfRoutes);
 app.use("/api/smart-shelves", smartShelfRoutes);
 app.use("/api/notes", noteRoutes);
 app.use("/api/activity", activityRoutes);
+app.use("/api/profile", profileRoutes);
 
 // generic error handler
 app.use((err, req, res, next) => {
