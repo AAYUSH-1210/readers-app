@@ -13,6 +13,7 @@ import searchRoutes from "./routes/search.routes.js";
 import meRoutes from "./routes/me.routes.js";
 import reviewRoutes from "./routes/review.routes.js";
 import favoriteRoutes from "./routes/favorite.routes.js";
+import shelfRoutes from "./routes/shelf.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -34,6 +35,7 @@ app.use("/api/search", searchRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/favorites", favoriteRoutes);
+app.use("/api/shelves", shelfRoutes);
 
 // generic error handler
 app.use((err, req, res, next) => {
