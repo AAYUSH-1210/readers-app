@@ -11,6 +11,7 @@ import bookRoutes from "./routes/book.routes.js";
 import readingRoutes from "./routes/reading.routes.js";
 import searchRoutes from "./routes/search.routes.js";
 import meRoutes from "./routes/me.routes.js";
+import reviewRoutes from "./routes/review.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -29,7 +30,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/books", bookRoutes);
 app.use("/api/reading", readingRoutes);
 app.use("/api/search", searchRoutes);
-app.use("/api/me", meRoutes); // mount "me" endpoints at /api/mer
+app.use("/api/me", meRoutes);
+app.use("/api/reviews", reviewRoutes);
 
 // generic error handler
 app.use((err, req, res, next) => {
