@@ -19,6 +19,7 @@ import noteRoutes from "./routes/note.routes.js";
 import activityRoutes from "./routes/activity.routes.js";
 import profileRoutes from "./routes/profile.routes.js";
 import followRoutes from "./routes/follow.routes.js";
+import commentRoutes from "./routes/comment.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -46,6 +47,7 @@ app.use("/api/notes", noteRoutes);
 app.use("/api/activity", activityRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/api/follow", followRoutes);
+app.use("/api/comments", commentRoutes);
 
 // generic error handler
 app.use((err, req, res, next) => {
