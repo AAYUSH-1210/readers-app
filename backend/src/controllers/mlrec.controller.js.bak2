@@ -1,7 +1,7 @@
-/*
- Minimal ASCII-only stub for mlrec.controller.js
- Exports the same function names used elsewhere.
-*/
+/**
+ * Minimal stub for mlrec.controller.js — safe ASCII-only file.
+ * Restores function names expected by the rest of the app.
+ */
 
 import Book from "../models/Book.js";
 import { findSimilarByEmbedding } from "../utils/embeddings.js";
@@ -10,18 +10,15 @@ import mongoose from "mongoose";
 export async function computeAllEmbeddings(req, res, next) {
   try {
     const totalBooks = await Book.countDocuments();
-    res.json({ message: "stub computeAllEmbeddings", totalBooks });
-  } catch (err) {
-    next(err);
-  }
+    res.json({ message: "stub: computeAllEmbeddings", totalBooks });
+  } catch (err) { next(err); }
 }
 
 export async function similarByML(req, res, next) {
   try {
     const { bookId } = req.params;
     if (!bookId) return res.status(400).json({ message: "bookId required" });
+    // return empty result for now
     return res.json({ seed: bookId, count: 0, books: [] });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 }

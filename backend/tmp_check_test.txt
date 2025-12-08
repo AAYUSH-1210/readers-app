@@ -1,0 +1,14 @@
+﻿node : F:\Latest Projects\readers-app\backend\tests\userTasteVector.test.js:1
+At line:1 char:1
++ node --check .\tests\userTasteVector.test.js 2>&1 | Out-File .\tmp_ch ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (F:\Latest Proje...ector.test.js:1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+∩┐╜∩┐╜/
+
+
+SyntaxError: Invalid or unexpected token
+    at checkSyntax (node:internal/main/check_syntax:72:5)
+
+Node.js v24.11.0

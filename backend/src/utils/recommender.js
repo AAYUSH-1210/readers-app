@@ -1,188 +1,356 @@
 // backend/src/utils/recommender.js
+// Node ESM
 import mongoose from "mongoose";
 import Book from "../models/Book.js";
-import Reading from "../models/Reading.js";
-import Favorite from "../models/Favorite.js";
 import Review from "../models/Review.js";
+import ReadingList from "../models/Reading.js";
+import User from "../models/User.js";
+
+import {
+  getEmbeddingForText,
+  findSimilarByEmbedding,
+  normalizeVector,
+  cosineSimilarity,
+} from "./embeddings.js"; // adjust path if needed
+
+// Optional: if you implemented computeUserTasteVector earlier, use it
+import { computeUserTasteVector } from "./userTasteVector.js";
 
 /**
- * Utility functions to produce recommendations.
- *
- * NOTE: All functions return an array of Book documents (populated minimally).
- * They avoid heavy computation and use aggregation where possible.
+ * Helper: fetch Book docs by ids (preserves order of ids passed)
+ * Accepts mixed ObjectId/string array.
  */
-
-/* Helper: fetch books by ids preserving order */
 export async function fetchBooksByIds(ids = []) {
-  if (!ids || ids.length === 0) return [];
-  // Keep order by mapping
-  const docs = await Book.find({ _id: { $in: ids } });
-  const map = new Map(docs.map((d) => [String(d._id), d]));
-  return ids.map((id) => map.get(String(id))).filter(Boolean);
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const objectIds = ids
+    .map((id) =>
+      mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId(id) : null
+    )
+    .filter(Boolean);
+  const books = await Book.find({ _id: { $in: objectIds } }).lean();
+  const byId = new Map(books.map((b) => [String(b._id), b]));
+  return ids.map((id) => byId.get(String(id))).filter(Boolean);
 }
 
-/* 1) Popularity-based: top favorited or most-read books */
-export async function popularBooks({ limit = 20 } = {}) {
-  // Prefer favorites count, fallback to reads
-  const favAgg = await Favorite.aggregate([
-    { $group: { _id: "$book", count: { $sum: 1 } } },
-    { $sort: { count: -1 } },
-    { $limit: limit },
-  ]);
-
-  const ids = favAgg.map((r) => r._id).filter(Boolean);
-  if (ids.length < limit) {
-    // supplement with most-read (by reading entries created)
-    const more = await Reading.aggregate([
-      { $group: { _id: "$book", reads: { $sum: 1 } } },
-      { $sort: { reads: -1 } },
-      { $limit: limit * 2 },
-    ]);
-    for (const r of more) {
-      if (!ids.find((x) => String(x) === String(r._id)))
-        ids.push(r._1d ?? r._id);
-      if (ids.length >= limit) break;
-    }
-  }
-
-  return fetchBooksByIds(ids.slice(0, limit));
-}
-
-/* 2) Content-based: similar by authors and subjects
-   For a given bookId (or externalId resolved to id), find other books sharing authors or subjects.
+/* -------------------------
+   Content-based similar
+   -------------------------
+   We prefer using stored book.embedding if available.
+   If not, compute embedding from title + description.
+   Use your vector index via findSimilarByEmbedding(vector, { topK }).
 */
-export async function contentBasedSimilar(bookId, { limit = 20 } = {}) {
+export async function contentBasedSimilar(bookId, { limit = 12 } = {}) {
   if (!bookId) return [];
-
-  const book = await Book.findById(bookId);
+  const book = await Book.findById(bookId).lean();
   if (!book) return [];
 
-  // gather candidate books by authors or subjects if available
-  const authors = (book.authors || []).filter(Boolean);
-  const subjects =
-    (book.raw && book.raw.subjects) ||
-    (book.raw && book.raw.openlibrary && book.raw.openlibrary.subjects) ||
-    [];
+  let vec = null;
+  if (
+    book.embedding &&
+    book.embedding.length &&
+    typeof book.embedding[0] === "number"
+  ) {
+    vec = book.embedding;
+  } else {
+    const text = `${book.title || ""} ${book.subtitle || ""} ${
+      book.description || ""
+    }`.slice(0, 2000);
+    vec = await getEmbeddingForText(text);
+  }
+  if (!vec) return [];
 
-  const q = {
-    _id: { $ne: book._id },
-    $or: [],
-  };
-
-  if (authors.length) q.$or.push({ authors: { $in: authors } });
-  if (subjects && subjects.length)
-    q.$or.push(
-      { "raw.subjects": { $in: subjects } },
-      { "raw.openlibrary.subjects": { $in: subjects } }
-    );
-
-  if (q.$or.length === 0) return [];
-
-  const candidates = await Book.find(q).limit(limit * 3);
-
-  // simple scoring: +2 for author match, +1 for subject match
-  const scores = candidates.map((c) => {
-    let score = 0;
-    for (const a of authors) if ((c.authors || []).includes(a)) score += 2;
-    const cSubjects =
-      (c.raw && (c.raw.subjects || c.raw.openlibrary?.subjects)) || [];
-    for (const s of subjects)
-      if (cSubjects && cSubjects.includes(s)) score += 1;
-    return { book: c, score };
+  // findSimilarByEmbedding should return [{ bookId, score }]
+  const neighbors = await findSimilarByEmbedding(vec, {
+    topK: Math.max(limit * 4, 50),
   });
+  if (!neighbors || neighbors.length === 0) return [];
 
-  scores.sort((a, b) => b.score - a.score);
-  return scores.slice(0, limit).map((s) => s.book);
+  // map to Book docs; filter out original book
+  const filtered = [];
+  const seen = new Set([String(book._id)]);
+  for (const n of neighbors) {
+    const id = n.bookId || n.id || n._id;
+    if (!id) continue;
+    if (seen.has(String(id))) continue;
+    seen.add(String(id));
+    const b = await Book.findById(id).lean();
+    if (!b) continue;
+    filtered.push({ ...b, _score: n.score ?? n.similarity ?? 0 });
+    if (filtered.length >= limit) break;
+  }
+  return filtered;
 }
 
-/* 3) Collaborative: item-to-item via co-occurrence in users' favorites/reading lists
-   Simple approach:
-   - Find all users who have the seed book in Reading or Favorite
-   - Find other books these users have in Reading/Favorite
-   - Rank by co-occurrence count
+/* -------------------------
+   Collaborative similar (co-read / co-review)
+   -------------------------
+   1) Find users who have read or reviewed the seed book
+   2) Collect other books those users have read/reviewed
+   3) Score by co-occurrence count and average rating
+   This is simple item-item collaborative filtering; good for MVP.
 */
-export async function collaborativeSimilar(bookId, { limit = 20 } = {}) {
+export async function collaborativeSimilar(bookId, { limit = 12 } = {}) {
   if (!bookId) return [];
 
-  const bookObjId = new mongoose.Types.ObjectId(bookId);
+  // Step 1: users who have this book in reading list (or reviewed it)
+  const readers = await ReadingList.find({ book: bookId })
+    .select("user")
+    .lean();
+  const reviewerDocs = await Review.find({ book: bookId })
+    .select("user")
+    .lean();
 
-  // get users who interacted with the book (reading or favorite)
-  const users1 = await Reading.distinct("user", { book: bookObjId });
-  const users2 = await Favorite.distinct("user", { book: bookObjId });
-  const users = Array.from(new Set([...(users1 || []), ...(users2 || [])]));
+  const userIds = new Set();
+  readers.forEach((r) => r.user && userIds.add(String(r.user)));
+  reviewerDocs.forEach((r) => r.user && userIds.add(String(r.user)));
 
-  if (users.length === 0) return [];
+  if (userIds.size === 0) return [];
 
-  // find other books these users have
-  const favs = await Favorite.aggregate([
-    { $match: { user: { $in: users }, book: { $ne: bookObjId } } },
+  const usersArray = Array.from(userIds).slice(0, 2000); // cap for performance
+
+  // Step 2: find other books these users have in reading list or reviews
+  // Aggregate counts from reading list
+  const readAgg = await ReadingList.aggregate([
+    {
+      $match: {
+        user: { $in: usersArray.map((id) => mongoose.Types.ObjectId(id)) },
+        book: { $ne: mongoose.Types.ObjectId(bookId) },
+      },
+    },
     { $group: { _id: "$book", count: { $sum: 1 } } },
     { $sort: { count: -1 } },
-    { $limit: limit },
+    { $limit: limit * 10 },
   ]);
 
-  const reads = await Reading.aggregate([
-    { $match: { user: { $in: users }, book: { $ne: bookObjId } } },
-    { $group: { _id: "$book", count: { $sum: 1 } } },
-    { $sort: { count: -1 } },
-    { $limit: limit },
+  // Aggregate from reviews (count + avg rating)
+  const reviewAgg = await Review.aggregate([
+    {
+      $match: {
+        user: { $in: usersArray.map((id) => mongoose.Types.ObjectId(id)) },
+        book: { $ne: mongoose.Types.ObjectId(bookId) },
+      },
+    },
+    {
+      $group: {
+        _id: "$book",
+        reviewCount: { $sum: 1 },
+        avgRating: { $avg: "$rating" },
+      },
+    },
+    { $sort: { reviewCount: -1 } },
+    { $limit: limit * 10 },
   ]);
 
-  const map = new Map();
-  for (const r of favs)
-    map.set(String(r._id), (map.get(String(r._id)) || 0) + r.count);
-  for (const r of reads)
-    map.set(String(r._id), (map.get(String(r._id)) || 0) + r.count);
+  // Score combine: coReadCount * 1.0 + reviewCount * 1.5 + avgRating bonus
+  const scoreMap = new Map();
 
-  const sorted = Array.from(map.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map((x) => x[0]);
+  for (const r of readAgg) {
+    const id = String(r._id);
+    const prev = scoreMap.get(id) || 0;
+    scoreMap.set(id, prev + (r.count || 0) * 1.0);
+  }
+  for (const r of reviewAgg) {
+    const id = String(r._id);
+    const prev = scoreMap.get(id) || 0;
+    const bonus =
+      (r.reviewCount || 0) * 1.5 + (r.avgRating ? (r.avgRating - 3) * 0.5 : 0); // rating centered at 3
+    scoreMap.set(id, prev + bonus);
+  }
 
-  return fetchBooksByIds(sorted);
+  // Sort by score and pick top N
+  const scored = Array.from(scoreMap.entries())
+    .map(([id, score]) => ({ id, score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit * 2);
+
+  // fetch books and return with score
+  const ids = scored.map((s) => s.id);
+  const books = await fetchBooksByIds(ids);
+  // map to preserve ordering and attach score
+  const byId = new Map(books.map((b) => [String(b._id), b]));
+  const out = [];
+  for (const s of scored) {
+    const b = byId.get(String(s.id));
+    if (!b) continue;
+    out.push({ ...b, _score: s.score });
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
-/* 4) Hybrid: combine strategies and dedupe */
+/* -------------------------
+   recommendForUser
+   -------------------------
+   Strategy:
+   1) Try building a user taste vector (embedding of user's reading+reviews+shelves)
+   2) Use vector index to get content-based recommendations near taste vector
+   3) Augment with collaborative similar from top content neighbors (or optionally seedBook)
+   4) Merge & rank (dedupe) and return top `limit`
+*/
 export async function recommendForUser(
   userId,
   { seedBookId = null, limit = 20 } = {}
 ) {
-  // 1) popularity (global)
-  const popular = await popularBooks({ limit: Math.ceil(limit / 2) });
+  if (!userId) return [];
 
-  // 2) if we have a seed book, get content + collaborative
-  let sims = [];
-  if (seedBookId) {
-    const c1 = await contentBasedSimilar(seedBookId, { limit });
-    const c2 = await collaborativeSimilar(seedBookId, { limit });
-    sims = [...c1, ...c2];
+  // 1) Compute user taste vector (use provided util if available)
+  let tasteVec = null;
+  try {
+    if (typeof computeUserTasteVector === "function") {
+      tasteVec = await computeUserTasteVector(userId);
+    }
+  } catch (err) {
+    // swallow and fallback
+    console.warn("computeUserTasteVector failed:", err.message);
   }
 
-  // 3) personalize using user's favorites / reading to boost matched authors
-  const userFavs = await Favorite.find({ user: userId }).limit(100);
-  const favBookIds = userFavs.map((f) => String(f.book));
+  // 2) If a seedBookId is provided, prefer seeds (contentBased) + collaborative around seed
+  const resultsMap = new Map(); // bookId -> { book, score, sources: [] }
 
-  // combine preserving order: sims first (if present), then popular
-  const combined = [...sims, ...popular];
+  async function pushCandidate(bookObj, score, source) {
+    if (!bookObj || !bookObj._id) return;
+    const id = String(bookObj._id);
+    const prev = resultsMap.get(id);
+    if (prev) {
+      prev.score += score;
+      prev.sources.add(source);
+    } else {
+      resultsMap.set(id, {
+        book: bookObj,
+        score: score,
+        sources: new Set([source]),
+      });
+    }
+  }
 
-  // dedupe by _id and remove books user already has (favorited or in reading)
-  const userReading = await Reading.distinct("book", { user: userId });
-  const skipSet = new Set([
-    ...favBookIds,
-    ...(userReading || []).map((x) => String(x)),
+  // If seed provided -> content + collaborative around seed
+  if (seedBookId) {
+    const c = await contentBasedSimilar(seedBookId, {
+      limit: Math.ceil(limit * 0.8),
+    });
+    for (const b of c) await pushCandidate(b, b._score ?? 1.0, "seed_content");
+
+    const coll = await collaborativeSimilar(seedBookId, {
+      limit: Math.ceil(limit * 0.6),
+    });
+    for (const b of coll)
+      await pushCandidate(b, b._score ?? 0.8, "seed_collab");
+  }
+
+  // If we have a taste vector -> query embedding index
+  if (tasteVec) {
+    const neighbors = await findSimilarByEmbedding(tasteVec, {
+      topK: Math.max(80, limit * 4),
+    });
+    for (const n of neighbors) {
+      const id = n.bookId || n.id || n._id;
+      if (!id) continue;
+      const b = await Book.findById(id).lean();
+      if (!b) continue;
+      await pushCandidate(b, (n.score ?? n.similarity ?? 0) * 1.5, "taste_vec");
+    }
+  }
+
+  // Fallback: if no tasteVec and no seed -> use top popular books (cold start)
+  if (!tasteVec && !seedBookId) {
+    const popular = await popularBooks({ limit: Math.max(limit, 40) });
+    for (const p of popular) await pushCandidate(p, 0.8, "popular_cold");
+  }
+
+  // Augment: for top candidates, run collaborativeSimilar to boost items that co-occur
+  // Pick a small set of current top ids and expand
+  const currentTop = Array.from(resultsMap.entries())
+    .map(([id, obj]) => ({ id, score: obj.score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  for (const t of currentTop) {
+    const coll = await collaborativeSimilar(t.id, { limit: 6 });
+    for (const b of coll)
+      await pushCandidate(b, (b._score ?? 0.6) * 0.6, "augment_collab");
+  }
+
+  // Convert map to sorted array, filter out duplicates and items the user already has in reading list
+  const userReads = await ReadingList.find({ user: userId })
+    .select("book")
+    .lean();
+  const owned = new Set(userReads.map((r) => String(r.book)));
+
+  const final = Array.from(resultsMap.values())
+    .filter((item) => item.book && !owned.has(String(item.book._id)))
+    .map((item) => ({
+      book: item.book,
+      score: item.score,
+      sources: Array.from(item.sources),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  return final;
+}
+
+/* -------------------------
+   popularBooks
+   -------------------------
+   Simple popularity ranking – uses recent review volume + avg rating.
+   You can later replace with precomputed book.popularity or a more sophisticated "trending" pipeline
+*/
+export async function popularBooks({ limit = 20, daysWindow = 30 } = {}) {
+  // if Book has popularity field, return by that
+  if (Book.schema.path("popularity")) {
+    const docs = await Book.find().sort({ popularity: -1 }).limit(limit).lean();
+    return docs;
+  }
+
+  const since = new Date();
+  since.setDate(since.getDate() - daysWindow);
+
+  const agg = await Review.aggregate([
+    { $match: { createdAt: { $gte: since } } },
+    {
+      $group: {
+        _id: "$book",
+        recentCount: { $sum: 1 },
+        avgRating: { $avg: "$rating" },
+      },
+    },
+    { $sort: { recentCount: -1, avgRating: -1 } },
+    { $limit: limit * 3 },
   ]);
 
-  const seen = new Set();
-  const results = [];
-  for (const b of combined) {
+  const out = [];
+  for (const a of agg) {
+    const b = await Book.findById(a._id).lean();
     if (!b) continue;
-    const id = String(b._id || b);
-    if (seen.has(id)) continue;
-    if (skipSet.has(id)) continue;
-    seen.add(id);
-    results.push(b);
-    if (results.length >= limit) break;
+    b._score = (a.recentCount || 0) * Math.log(1 + (a.avgRating || 0));
+    out.push(b);
+    if (out.length >= limit) break;
   }
 
-  return results;
+  // If not enough recent trending books, fill with high avg rating books
+  if (out.length < limit) {
+    const need = limit - out.length;
+    const rated = await Review.aggregate([
+      {
+        $group: {
+          _id: "$book",
+          avgRating: { $avg: "$rating" },
+          cnt: { $sum: 1 },
+        },
+      },
+      { $match: { cnt: { $gte: 3 } } },
+      { $sort: { avgRating: -1, cnt: -1 } },
+      { $limit: need * 3 },
+    ]);
+    for (const r of rated) {
+      if (out.length >= limit) break;
+      const b = await Book.findById(r._id).lean();
+      if (!b) continue;
+      if (out.find((o) => String(o._id) === String(b._id))) continue;
+      b._score = r.avgRating;
+      out.push(b);
+    }
+  }
+
+  return out.slice(0, limit);
 }

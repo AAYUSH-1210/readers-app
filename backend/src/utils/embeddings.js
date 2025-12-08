@@ -1,182 +1,94 @@
-// backend/src/utils/embeddings.js
-import natural from "natural";
+/* backend/src/utils/embeddings.js
+   Minimal safe embeddings helper for tests and local development.
+   Exports: getEmbeddingForText, normalizeVector, findSimilarByEmbedding, cosineSimilarity
+*/
+
 import Book from "../models/Book.js";
-import OpenAI from "openai";
 
-const OPENAI_KEY = process.env.OPENAI_API_KEY || null;
-const openaiClient = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
-
-/* ------------------------------------------
-   Build text content for ML embedding
-------------------------------------------- */
-export function bookToText(book) {
-  const parts = [];
-  if (book.title) parts.push(book.title);
-  if (book.authors?.length) parts.push(book.authors.join(", "));
-  if (book.description) parts.push(String(book.description));
-
-  const subjects =
-    (book.raw && (book.raw.subjects || book.raw.openlibrary?.subjects)) || [];
-  if (subjects.length) parts.push(subjects.slice(0, 10).join(", "));
-
-  return parts.join("\n");
+/* normalize vector */
+export function normalizeVector(v) {
+  if (!Array.isArray(v) || v.length === 0) return v;
+  const norm = Math.sqrt(v.reduce((s, x) => s + (x || 0) ** 2, 0));
+  if (norm === 0) return v;
+  return v.map(x => (x || 0) / norm);
 }
 
-/* ------------------------------------------
-   Try OpenAI embedding (returns null if failed)
-------------------------------------------- */
-async function tryOpenAIEmbedding(text) {
-  if (!openaiClient) return null;
-
-  try {
-    const resp = await openaiClient.embeddings.create({
-      model: "text-embedding-3-small",
-      input: text,
-    });
-
-    return {
-      embedding: resp.data[0].embedding,
-      model: "openai:text-embedding-3-small",
-    };
-  } catch (err) {
-    console.warn(
-      "OpenAI FAILED → using fallback",
-      err.response?.data || err.message
-    );
-    return null;
-  }
-}
-
-/* ------------------------------------------
-   TF–IDF Corpus embedding (fallback)
-------------------------------------------- */
-const TOP_N = 256;
-
-export async function computeCorpusTfIdfEmbeddings({ topN = TOP_N } = {}) {
-  const books = await Book.find().lean();
-  if (!books.length) return { results: [] };
-
-  const tfidf = new natural.TfIdf();
-  const idMap = [];
-
-  // Add all books to corpus
-  books.forEach((b) => {
-    tfidf.addDocument(bookToText(b));
-    idMap.push(String(b._id));
-  });
-
-  // Build vocabulary by global importance
-  const termTotals = {};
-  for (let i = 0; i < books.length; i++) {
-    const terms = tfidf.listTerms(i);
-    for (const t of terms) {
-      termTotals[t.term] = (termTotals[t.term] || 0) + t.tfidf;
-    }
-  }
-
-  const vocab = Object.entries(termTotals)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(([term]) => term);
-
-  const results = [];
-
-  // Create each book vector
-  for (let i = 0; i < books.length; i++) {
-    const vec = vocab.map((term) => tfidf.tfidf(term, i) || 0);
-
-    // Normalize L2
-    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-    const embedding = vec.map((v) => v / norm);
-
-    results.push({
-      _id: idMap[i],
-      embedding,
-    });
-  }
-
-  return { results, vocabSize: vocab.length };
-}
-
-/* ------------------------------------------
-   Save embeddings (OpenAI → fallback)
-------------------------------------------- */
-export async function computeAndSaveBestEmbedding(bookDoc) {
-  const text = bookToText(bookDoc);
-
-  // 1) Try OpenAI first
-  let result = await tryOpenAIEmbedding(text);
-
-  if (!result) {
-    // 2) Use TF-IDF fallback (single-document quick embedding)
-    // NOTE: Better quality comes from corpus TF-IDF below
-    const tfidf = new natural.TfIdf();
-    tfidf.addDocument(text);
-
-    const terms = tfidf.listTerms(0).slice(0, TOP_N); // top terms
-    const vec = terms.map((t) => t.tfidf || 0);
-    while (vec.length < TOP_N) vec.push(0);
-
-    // Normalize
-    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-
-    result = {
-      embedding: vec.map((v) => v / norm),
-      model: "tfidf-single",
-    };
-  }
-
-  // Save embedding to DB
-  bookDoc.embedding = result.embedding;
-  bookDoc.embeddingModel = result.model;
-  await bookDoc.save();
-
-  return bookDoc;
-}
-
-/* ------------------------------------------
-   Compute TF-IDF corpus embeddings (best fallback)
-------------------------------------------- */
-export async function saveCorpusEmbeddingsToDB() {
-  const { results } = await computeCorpusTfIdfEmbeddings();
-
-  for (const item of results) {
-    await Book.findByIdAndUpdate(item._id, {
-      embedding: item.embedding,
-      embeddingModel: "tfidf-corpus",
-    });
-  }
-
-  return results.length;
-}
-
-/* ------------------------------------------
-   Cosine similarity + Top-K search
-------------------------------------------- */
-export function cosineSimilarity(a = [], b = []) {
-  let dot = 0,
-    na = 0,
-    nb = 0;
-
-  for (let i = 0; i < a.length; i++) {
+/* cosine similarity */
+export function cosineSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+  const n = Math.min(a.length, b.length);
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < n; i++) {
     dot += (a[i] || 0) * (b[i] || 0);
     na += (a[i] || 0) ** 2;
     nb += (b[i] || 0) ** 2;
   }
-
-  if (!na || !nb) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  if (denom === 0) return 0;
+  return dot / denom;
 }
 
-export async function findSimilarByEmbedding(seed, { limit = 10 } = {}) {
-  const candidates = await Book.find({
-    embedding: { $exists: true, $ne: null },
-  }).select("title authors cover embedding externalId description");
-
-  const scored = candidates.map((c) => ({
-    book: c,
-    score: cosineSimilarity(seed, c.embedding || []),
-  }));
-
-  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+/* deterministic fallback embedding */
+function fallbackEmbeddingFromText(text = "") {
+  const L = 64;
+  const v = new Array(L).fill(0);
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    const idx = i % L;
+    v[idx] += (code % 13) + (code % 7);
+  }
+  for (let i = 0; i < L; i++) v[i] = v[i] / 100.0;
+  return normalizeVector(v);
 }
+
+/* dynamic OpenAI client loader (safe if OPENAI_API_KEY absent) */
+let _openaiClient = null;
+async function getOpenAIClient() {
+  if (_openaiClient) return _openaiClient;
+  if (!process.env.OPENAI_API_KEY) return null;
+  try {
+    const mod = await import("openai");
+    const OpenAI = mod?.OpenAI ?? mod?.default ?? mod;
+    _openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    return _openaiClient;
+  } catch (e) {
+    console.warn("OpenAI client load failed:", e?.message ?? e);
+    return null;
+  }
+}
+
+/* getEmbeddingForText(text, { useOpenAI = true }) */
+export async function getEmbeddingForText(text, { useOpenAI = true } = {}) {
+  if (useOpenAI) {
+    const client = await getOpenAIClient();
+    if (client) {
+      try {
+        const resp = await client.embeddings.create({
+          model: "text-embedding-3-small",
+          input: text,
+        });
+        const emb = resp?.data?.[0]?.embedding;
+        if (Array.isArray(emb)) return normalizeVector(emb);
+      } catch (e) {
+        console.warn("OpenAI embedding failed:", e?.message ?? e);
+      }
+    }
+  }
+  return fallbackEmbeddingFromText(String(text || ""));
+}
+
+/* findSimilarByEmbedding(vec, { topK = 20 }) */
+export async function findSimilarByEmbedding(vec, { topK = 20 } = {}) {
+  if (!Array.isArray(vec) || vec.length === 0) return [];
+  const docs = await Book.find({ embedding: { $exists: true, $ne: [] } }).select("_id embedding").lean().limit(2000);
+  const out = [];
+  for (const d of docs) {
+    if (!d.embedding || !Array.isArray(d.embedding)) continue;
+    const score = cosineSimilarity(vec, d.embedding);
+    out.push({ book: d, score });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, Math.max(0, topK));
+}
+
+export default { getEmbeddingForText, normalizeVector, findSimilarByEmbedding, cosineSimilarity };
