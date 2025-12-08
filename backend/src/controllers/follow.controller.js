@@ -2,6 +2,7 @@
 import Follow from "../models/Follow.js";
 import User from "../models/User.js";
 import { logActivity } from "../utils/activityLogger.js";
+import { createNotification } from "../utils/notify.js";
 
 /* Follow a user */
 export async function followUser(req, res, next) {
@@ -27,6 +28,15 @@ export async function followUser(req, res, next) {
       type: "follow",
       action: "created",
       meta: { following },
+    });
+
+    // 🔔 Send notification to the user being followed
+    await createNotification({
+      user: following, // receiving user
+      fromUser: follower, // actor user
+      type: "follow",
+      targetType: "none",
+      message: "started following you",
     });
 
     res.status(201).json({ message: "Followed", follow });
