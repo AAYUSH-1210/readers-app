@@ -22,6 +22,7 @@ import followRoutes from "./routes/follow.routes.js";
 import commentRoutes from "./routes/comment.routes.js";
 import likeRoutes from "./routes/like.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
+import recommendRoutes from "./routes/recommend.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -52,6 +53,7 @@ app.use("/api/follow", followRoutes);
 app.use("/api/comments", commentRoutes);
 app.use("/api/likes", likeRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/recommend", recommendRoutes);
 
 // generic error handler
 app.use((err, req, res, next) => {
