@@ -10,6 +10,9 @@ const BookSchema = new mongoose.Schema(
     source: { type: String, default: "openlibrary" },
     raw: { type: mongoose.Schema.Types.Mixed },
     description: { type: String, default: null },
+
+    embedding: { type: [Number], default: undefined },
+    embeddingModel: { type: String, default: null },
   },
   { timestamps: true }
 );
