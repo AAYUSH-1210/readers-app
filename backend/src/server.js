@@ -2,6 +2,8 @@
 import dotenv from "dotenv";
 dotenv.config();
 
+import jwt from "jsonwebtoken";
+import { setIo } from "./utils/socket.js";
 import express from "express";
 import cors from "cors";
 import http from "http";
@@ -36,6 +38,48 @@ console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+io.use((socket, next) => {
+  try {
+    // client should send { auth: { token } } or ?token= in query
+    const token =
+      socket.handshake?.auth?.token || socket.handshake?.query?.token;
+    if (!token) {
+      // reject unauthenticated sockets by default
+      return next(new Error("auth error: token required"));
+    }
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    // Standardize user id field (support id, userId, _id)
+    const userId = payload?.id || payload?.userId || payload?._id;
+    if (!userId) return next(new Error("auth error: invalid token payload"));
+    socket.user = { id: String(userId), ...payload };
+    return next();
+  } catch (err) {
+    console.error(
+      "socket auth failed:",
+      err && err.message ? err.message : err
+    );
+    return next(new Error("auth error"));
+  }
+});
+
+// initialize your socket handling
+try {
+  // init socketService (this will also call setIo internally)
+  initSocket(io);
+  // also set global io in socket.js (safe no-op if already set)
+  try {
+    setIo(io);
+  } catch (e) {
+    console.warn(
+      "setIo call failed (non-fatal)",
+      e && e.message ? e.message : e
+    );
+  }
+  console.log("Socket.IO initialized with JWT handshake auth");
+} catch (e) {
+  console.error("initSocket failed:", e && e.stack ? e.stack : e);
+}
 
 // configure CORS for HTTP routes
 app.use(

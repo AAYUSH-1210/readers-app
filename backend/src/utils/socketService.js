@@ -1,52 +1,100 @@
 // backend/src/utils/socketService.js
-// Minimal socket registry helper. Initialize once with initSocket(io)
-// and call emitToUser(userId, event, payload) to send realtime messages.
+import { setIo } from "./socket.js"; // ensures getIo() returns same io
+import debug from "debug";
+const log = debug("app:socketService");
 
+// ioInstance will be set via initSocket (and also via setIo)
 let ioInstance = null;
-// Map userId (string) -> Set of socketIds
+
+// Optional in-memory map for visibility: userId -> Set(socketId)
 const userSockets = new Map();
 
 export function initSocket(io) {
+  if (!io) throw new Error("initSocket requires socket.io instance");
   ioInstance = io;
+  // expose io via socket.js/getIo
+  try {
+    setIo(io);
+  } catch (e) {
+    // swallow if setIo not available for some reason
+    log("setIo failed", e && e.message ? e.message : e);
+  }
 
   io.on("connection", (socket) => {
-    // expect client to pass { auth: { token, userId } } on handshake or
-    // to emit an "auth" event immediately. We'll accept both styles.
+    // after JWT auth middleware in server.js, socket.user should be present
+    const userId = socket.user?.id || socket.handshake?.auth?.userId;
+    if (userId) {
+      const uid = String(userId);
+      // join a per-user room (works with redis adapter later)
+      try {
+        socket.join(`user:${uid}`);
+      } catch (e) {
+        log("socket.join failed", e && e.message ? e.message : e);
+      }
 
-    // prefer handshake auth.userId if present
-    const handshakeUserId = socket.handshake?.auth?.userId;
-    if (handshakeUserId) {
-      const set = userSockets.get(String(handshakeUserId)) || new Set();
+      // maintain optional local mapping (useful in single-node dev)
+      const set = userSockets.get(uid) || new Set();
       set.add(socket.id);
-      userSockets.set(String(handshakeUserId), set);
-      socket.userId = String(handshakeUserId);
+      userSockets.set(uid, set);
+      socket.userId = uid;
+      log("socket connected and joined room for user", uid, socket.id);
+    } else {
+      log("socket connected without user (unauthenticated):", socket.id);
     }
 
-    // also listen for explicit auth event (if client uses that)
-    socket.on("auth", (data) => {
-      const uid = data?.userId;
-      if (!uid) return;
-      const set = userSockets.get(String(uid)) || new Set();
-      set.add(socket.id);
-      userSockets.set(String(uid), set);
-      socket.userId = String(uid);
+    // example: let client request unread count or quick actions
+    socket.on("get:unreadCount", async (cb) => {
+      try {
+        // lazy import to avoid circular deps
+        const Notification = (await import("../models/Notification.js"))
+          .default;
+        if (!socket.userId) return cb && cb(null, { unread: 0 });
+        const count = await Notification.countDocuments({
+          user: socket.userId,
+          seen: false,
+        });
+        cb && cb(null, { unread: count });
+      } catch (e) {
+        cb && cb(e && e.message ? e.message : "error");
+      }
     });
 
     socket.on("disconnect", () => {
       const uid = socket.userId;
       if (!uid) return;
-      const set = userSockets.get(String(uid));
+      const set = userSockets.get(uid);
       if (!set) return;
       set.delete(socket.id);
-      if (set.size === 0) userSockets.delete(String(uid));
+      if (set.size === 0) userSockets.delete(uid);
+      log("socket disconnected", uid, socket.id);
     });
   });
 }
 
 export function emitToUser(userId, event, payload) {
   if (!ioInstance) return false;
-  const set = userSockets.get(String(userId));
-  if (!set || set.size === 0) return false;
-  for (const sid of set) ioInstance.to(sid).emit(event, payload);
-  return true;
+  try {
+    ioInstance.to(`user:${String(userId)}`).emit(event, payload);
+    return true;
+  } catch (e) {
+    console.error("emitToUser failed", e && e.message ? e.message : e);
+    return false;
+  }
+}
+
+export function emitToUsers(userIds = [], event, payload) {
+  if (!ioInstance) return false;
+  try {
+    for (const id of userIds) {
+      ioInstance.to(`user:${String(id)}`).emit(event, payload);
+    }
+    return true;
+  } catch (e) {
+    console.error("emitToUsers failed", e && e.message ? e.message : e);
+    return false;
+  }
+}
+
+export function getConnectedUserIds() {
+  return Array.from(userSockets.keys());
 }
