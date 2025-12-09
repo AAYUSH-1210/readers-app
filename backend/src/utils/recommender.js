@@ -24,9 +24,12 @@ export async function fetchBooksByIds(ids = []) {
   if (!Array.isArray(ids) || ids.length === 0) return [];
   const objectIds = ids
     .map((id) =>
-      mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId(id) : null
+      mongoose.Types.ObjectId.isValid(id)
+        ? new mongoose.Types.ObjectId(id)
+        : null
     )
     .filter(Boolean);
+
   const books = await Book.find({ _id: { $in: objectIds } }).lean();
   const byId = new Map(books.map((b) => [String(b._id), b]));
   return ids.map((id) => byId.get(String(id))).filter(Boolean);
@@ -113,8 +116,12 @@ export async function collaborativeSimilar(bookId, { limit = 12 } = {}) {
   const readAgg = await ReadingList.aggregate([
     {
       $match: {
-        user: { $in: usersArray.map((id) => mongoose.Types.ObjectId(id)) },
-        book: { $ne: mongoose.Types.ObjectId(bookId) },
+        user: {
+          $in: usersArray
+            .filter((id) => mongoose.Types.ObjectId.isValid(id))
+            .map((id) => new mongoose.Types.ObjectId(id)),
+        },
+        book: new mongoose.Types.ObjectId(bookId), // or {$ne: ...} if you really need "not equal"
       },
     },
     { $group: { _id: "$book", count: { $sum: 1 } } },
@@ -126,8 +133,12 @@ export async function collaborativeSimilar(bookId, { limit = 12 } = {}) {
   const reviewAgg = await Review.aggregate([
     {
       $match: {
-        user: { $in: usersArray.map((id) => mongoose.Types.ObjectId(id)) },
-        book: { $ne: mongoose.Types.ObjectId(bookId) },
+        user: {
+          $in: usersArray
+            .filter((id) => mongoose.Types.ObjectId.isValid(id))
+            .map((id) => new mongoose.Types.ObjectId(id)),
+        },
+        book: { $ne: new mongoose.Types.ObjectId(bookId) },
       },
     },
     {
