@@ -166,7 +166,10 @@ export async function getBook(req, res, next) {
     // try fetching from OpenLibrary
     const fetched = await fetchFromOpenLibrary(normalized);
     if (!fetched) {
-      return res.status(404).json({ message: "Book not found" });
+      return res.status(404).json({
+        message: "Requested book does not exist",
+        code: "BOOK_NOT_FOUND",
+      });
     }
 
     // save and return

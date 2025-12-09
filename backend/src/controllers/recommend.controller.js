@@ -47,7 +47,12 @@ export async function similarToBook(req, res, next) {
       book = await Book.findById(bookId);
     }
 
-    if (!book) return res.status(404).json({ message: "Book not found" });
+    if (!book) {
+      return res.status(404).json({
+        message: "Recommendation target book not found",
+        code: "BOOK_NOT_FOUND",
+      });
+    }
 
     const c = await contentBasedSimilar(book._id, {
       limit: Math.ceil(limit / 2),

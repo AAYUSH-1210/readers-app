@@ -1,17 +1,10 @@
 // backend/src/services/trending.service.js
-import mongoose from "mongoose";
-import Book from "../models/Book.js";
 import Review from "../models/Review.js";
-import Reading from "../models/Reading.js"; // model that records read/start events (adjust if different)
-import { ObjectId } from "mongodb";
+import Book from "../models/Book.js";
+import Reading from "../models/Reading.js";
 
-/**
- * Compute trending books over a recent window (defaults 7 days).
- * Returns array of { book, trendingScore, recentReviews, readingStarts }
- */
 const DEFAULT_WINDOW_DAYS = 7;
-
-function isoDaysAgo(days) {
+function daysAgo(days) {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d;
@@ -19,39 +12,34 @@ function isoDaysAgo(days) {
 
 export default {
   /**
-   * Returns top N trending candidate books with a trendingScore.
+   * getTrendingBooks(limit, { windowDays })
+   * - Always returns an array.
+   * - If no recent activity, returns popular books as a fallback with fallback:true.
    */
   async getTrendingBooks(
-    limit = 100,
-    sinceDate = null,
-    windowDays = DEFAULT_WINDOW_DAYS
+    limit = 20,
+    { windowDays = DEFAULT_WINDOW_DAYS } = {}
   ) {
-    const since = sinceDate ? new Date(sinceDate) : isoDaysAgo(windowDays);
+    const recentSince = daysAgo(windowDays);
 
-    // Aggregation:
-    // - Count recent reviews per book
-    // - Count reading starts per book
-    // - Compute small rating velocity (avgRating this window - avgRating 30-60d ago) if available
-    // - Join book doc
     const pipeline = [
-      // recent reviews
-      { $match: { createdAt: { $gte: since } } },
+      { $match: { createdAt: { $gte: recentSince } } },
       {
         $group: {
           _id: "$bookId",
           recentReviews: { $sum: 1 },
           avgRatingNow: { $avg: "$rating" },
+          reviewsAllCount: { $sum: 1 },
         },
       },
       {
         $lookup: {
-          from: "readings",
+          from: (Reading.collection && Reading.collection.name) || "readings",
           localField: "_id",
           foreignField: "bookId",
           as: "readings",
         },
       },
-      // compute readingStarts from readings array (we still filter by createdAt)
       {
         $addFields: {
           readingStarts: {
@@ -59,71 +47,96 @@ export default {
               $filter: {
                 input: "$readings",
                 as: "r",
-                cond: { $gte: ["$$r.startedAt", since] },
+                cond: { $gte: ["$$r.startedAt", recentSince] },
               },
             },
           },
         },
       },
-      // join book
       {
         $lookup: {
-          from: "books",
+          from: (Book.collection && Book.collection.name) || "books",
           localField: "_id",
           foreignField: "_id",
           as: "book",
         },
       },
-      { $unwind: "$book" },
+      { $unwind: { path: "$book", preserveNullAndEmptyArrays: true } },
       {
         $project: {
           book: 1,
           recentReviews: 1,
           avgRatingNow: 1,
           readingStarts: 1,
+          reviewsAllCount: 1,
         },
       },
-      // optional: compute normalized trending score by simple heuristic
-      {
-        $addFields: {
-          trendingScore: {
-            $add: [
-              {
-                $multiply: [
-                  0.55,
-                  { $min: [1, { $divide: ["$recentReviews", 20] }] },
-                ],
-              }, // recent reviews influence
-              {
-                $multiply: [
-                  0.25,
-                  { $min: [1, { $divide: ["$readingStarts", 20] }] },
-                ],
-              }, // starts influence
-              {
-                $multiply: [
-                  0.2,
-                  { $min: [1, { $divide: [{ $abs: "$avgRatingNow" }, 5] }] },
-                ],
-              }, // rating factor (small)
-            ],
-          },
-        },
-      },
-      { $sort: { trendingScore: -1, recentReviews: -1 } },
-      { $limit: limit },
+      // keep a larger candidate set, we'll filter null-books after
+      { $sort: { recentReviews: -1 } },
+      { $limit: limit * 3 },
     ];
 
-    // Execute on reviews collection
-    const results = await Review.aggregate(pipeline).allowDiskUse(true).exec();
+    const rows = await Review.aggregate(pipeline).allowDiskUse(true).exec();
 
-    // Map to return consistent shape
-    return results.map((r) => ({
-      book: r.book,
-      trendingScore: r.trendingScore,
-      recentReviews: r.recentReviews,
-      readingStarts: r.readingStarts,
-      score: r.trendingScore, // use `score` field for the composer
-    }));
+    // Filter out rows with missing book doc
+    const rowsWithBook = (rows || []).filter((r) => r.book && r.book._id);
+
+    // If nothing meaningful, fallback to popular books
+    if (!rowsWithBook.length) {
+      const popular = await Book.find({})
+        .sort({ ratingsCount: -1, avgRating: -1 })
+        .limit(limit)
+        .select("title authors coverUrl avgRating ratingsCount genres")
+        .lean();
+
+      return popular.map((b) => ({
+        book: {
+          _id: b._id,
+          title: b.title,
+          authors: b.authors || b.author,
+          coverUrl: b.coverUrl || b.image,
+          avgRating: b.avgRating,
+        },
+        trendingScore: 0,
+        recentReviews: 0,
+        readingStarts: 0,
+        fallback: true,
+      }));
+    }
+
+    // Score by normalized recentReviews + readingStarts
+    const recentArr = rowsWithBook.map((r) => r.recentReviews || 0);
+    const readArr = rowsWithBook.map((r) => r.readingStarts || 0);
+
+    const minMax = (arr) => {
+      const min = Math.min(...arr);
+      const max = Math.max(...arr);
+      const range = max - min || 1;
+      return arr.map((v) => (v - min) / range);
+    };
+
+    const normRecent = minMax(recentArr);
+    const normRead = minMax(readArr);
+
+    const items = rowsWithBook.map((r, i) => {
+      const score = 0.7 * normRecent[i] + 0.3 * normRead[i];
+      return {
+        book: {
+          _id: r.book._id,
+          title: r.book.title,
+          authors: r.book.authors || r.book.author,
+          coverUrl: r.book.coverUrl || r.book.image,
+          avgRating: r.avgRatingNow ?? r.book.avgRating,
+        },
+        trendingScore: score,
+        recentReviews: r.recentReviews || 0,
+        readingStarts: r.readingStarts || 0,
+        fallback: false,
+      };
+    });
+
+    // sort and return top N
+    items.sort((a, b) => b.trendingScore - a.trendingScore);
+    return items.slice(0, limit);
   },
 };

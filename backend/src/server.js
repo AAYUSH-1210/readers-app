@@ -25,6 +25,7 @@ import notificationRoutes from "./routes/notification.routes.js";
 import recommendRoutes from "./routes/recommend.routes.js";
 import mlrecRoutes from "./routes/mlrec.routes.js";
 import feedRouter from "./routes/feed.routes.js";
+import trendingRouter from "./routes/trending.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -40,6 +41,7 @@ app.get("/", (req, res) => res.send("📚 Readers API running"));
 
 // mount routes (ensure each route file uses `export default router;`)
 app.use("/api/auth", authRoutes);
+app.use("/api/books/trending", trendingRouter);
 app.use("/api/books", bookRoutes);
 app.use("/api/reading", readingRoutes);
 app.use("/api/search", searchRoutes);
@@ -59,12 +61,14 @@ app.use("/api/recommend", recommendRoutes);
 app.use("/api/mlrec", mlrecRoutes);
 app.use("/api/feed", feedRouter);
 
-// generic error handler
+// generic error handler (replace existing)
 app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
-  const status = err.status || 500;
-  const message = err.message || "Internal Server Error";
-  res.status(status).json({ message });
+  console.error("Unhandled error:", err && err.stack ? err.stack : err);
+  const status = err?.status || 500;
+  // Don't leak internal messages; return a friendly envelope
+  res.status(status).json({
+    message: status === 500 ? "Internal Server Error" : err?.message || "Error",
+  });
 });
 
 // start server after DB connected
