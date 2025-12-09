@@ -6,7 +6,10 @@ import Review from "../models/Review.js";
 import Note from "../models/Note.js";
 import Comment from "../models/Comment.js";
 import ShelfItem from "../models/ShelfItem.js";
+import User from "../models/User.js";
 import { logActivity } from "../utils/activityLogger.js";
+import { createNotification } from "../utils/notify.js";
+import { emitToUser } from "../utils/socketService.js";
 
 /* Helper: validate target exists (best-effort) */
 async function targetExists(targetType, targetId) {
@@ -29,7 +32,7 @@ async function targetExists(targetType, targetId) {
 /**
  * POST /api/likes/toggle
  * body: { targetType, targetId }
- * toggles like for current user; returns { liked: boolean, count: number }
+ * toggles like for current user; returns { liked: boolean, count: number, likeId? }
  */
 export async function toggleLike(req, res, next) {
   try {
@@ -41,7 +44,7 @@ export async function toggleLike(req, res, next) {
         .status(400)
         .json({ message: "targetType and targetId required" });
 
-    // allow targetId to be string _id; ensure it's ObjectId
+    // ensure targetId is valid ObjectId
     if (!mongoose.isValidObjectId(targetId)) {
       return res
         .status(400)
@@ -51,42 +54,143 @@ export async function toggleLike(req, res, next) {
     const exists = await targetExists(targetType, targetId);
     if (!exists) return res.status(404).json({ message: "Target not found" });
 
-    // try to create like; if duplicate error => remove existing one (toggle)
+    // Try create; on duplicate remove -> toggle behavior
     try {
       const like = await Like.create({ user: userId, targetType, targetId });
-      // success => liked
-      // activity
+
+      // increment likesCount on parent (best-effort)
+      const modelMap = {
+        book: Book,
+        review: Review,
+        note: Note,
+        comment: Comment,
+        shelfItem: ShelfItem,
+      };
+      const TargetModel = modelMap[targetType];
+      if (TargetModel) {
+        try {
+          await TargetModel.findByIdAndUpdate(targetId, {
+            $inc: { likesCount: 1 },
+          });
+        } catch (e) {
+          console.error("Failed to increment likesCount", e);
+        }
+      }
+
+      // activity log (use "like")
       logActivity({
         user: userId,
-        type: "favorite", // reuse "favorite" or add "like" to Activity enum if you prefer
-        action: "added",
+        type: "like",
+        action: "created",
         meta: { targetType, targetId: String(targetId) },
         book: targetType === "book" ? targetId : null,
       });
 
+      // create notification for recipient (best-effort)
+      try {
+        // resolve recipient by target type
+        let recipientId = null;
+        if (targetType === "review") {
+          const rev = await Review.findById(targetId).select("user");
+          recipientId = rev?.user;
+        } else if (targetType === "note") {
+          const n = await Note.findById(targetId).select("user");
+          recipientId = n?.user;
+        } else if (targetType === "comment") {
+          const c = await Comment.findById(targetId).select("user");
+          recipientId = c?.user;
+        } else if (targetType === "shelfItem") {
+          const si = await ShelfItem.findById(targetId).select("user");
+          recipientId = si?.user;
+        } else if (targetType === "book") {
+          const b = await Book.findById(targetId).select("owner"); // optional owner field
+          recipientId = b?.owner;
+        }
+
+        // only notify if recipient exists and is not the actor
+        if (recipientId && String(recipientId) !== String(userId)) {
+          const actor = await User.findById(userId).select(
+            "name username avatarUrl"
+          );
+          const actorName =
+            (actor && (actor.name || actor.username)) || "Someone";
+          const message = `${actorName} liked your ${targetType}`;
+
+          const not = await createNotification({
+            user: recipientId,
+            fromUser: userId,
+            type: "like",
+            targetType,
+            targetId,
+            message,
+          });
+
+          // emit realtime event (best-effort)
+          try {
+            emitToUser(recipientId, "notification", {
+              id: not?._id,
+              type: "like",
+              actor: {
+                _id: actor?._id,
+                name: actorName,
+                avatarUrl: actor?.avatarUrl,
+              },
+              targetType,
+              targetId,
+              message,
+              createdAt: not?.createdAt,
+            });
+          } catch (e) {
+            // don't fail the request if emit fails
+            console.error("emitToUser failed", e);
+          }
+        }
+      } catch (errNotify) {
+        console.error("Failed to create/emit notification", errNotify);
+      }
+
       const count = await Like.countDocuments({ targetType, targetId });
       return res.status(201).json({ liked: true, count, likeId: like._id });
     } catch (err) {
-      // if duplicate key error -> it already exists; remove it
+      // duplicate key -> toggle off
       if (err.code === 11000) {
         const removed = await Like.findOneAndDelete({
           user: userId,
           targetType,
           targetId,
         });
-        const count = await Like.countDocuments({ targetType, targetId });
+        // decrement likesCount on parent (best-effort)
+        const modelMap = {
+          book: Book,
+          review: Review,
+          note: Note,
+          comment: Comment,
+          shelfItem: ShelfItem,
+        };
+        const TargetModel = modelMap[targetType];
+        if (TargetModel) {
+          try {
+            await TargetModel.findByIdAndUpdate(targetId, {
+              $inc: { likesCount: -1 },
+            });
+          } catch (e) {
+            console.error("Failed to decrement likesCount", e);
+          }
+        }
 
-        // activity: removed
+        // activity log
         logActivity({
           user: userId,
-          type: "favorite",
+          type: "like",
           action: "removed",
           meta: { targetType, targetId: String(targetId) },
         });
 
+        const count = await Like.countDocuments({ targetType, targetId });
         return res.json({ liked: false, count });
       }
-      // If other error, maybe it exists already; attempt to find and remove
+
+      // if other error, check existing and remove if present
       const existing = await Like.findOne({
         user: userId,
         targetType,
@@ -97,7 +201,7 @@ export async function toggleLike(req, res, next) {
         const count = await Like.countDocuments({ targetType, targetId });
         logActivity({
           user: userId,
-          type: "favorite",
+          type: "like",
           action: "removed",
           meta: { targetType, targetId: String(targetId) },
         });

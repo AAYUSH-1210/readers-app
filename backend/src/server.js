@@ -4,6 +4,8 @@ dotenv.config();
 
 import express from "express";
 import cors from "cors";
+import http from "http";
+import { Server as IOServer } from "socket.io";
 import { connectDB } from "./config/db.js";
 
 import authRoutes from "./routes/auth.routes.js";
@@ -27,13 +29,21 @@ import mlrecRoutes from "./routes/mlrec.routes.js";
 import feedRouter from "./routes/feed.routes.js";
 import trendingRouter from "./routes/trending.routes.js";
 
+import { initSocket } from "./utils/socketService.js";
+
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// configure CORS for HTTP routes
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || true,
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 // health
@@ -61,26 +71,42 @@ app.use("/api/recommend", recommendRoutes);
 app.use("/api/mlrec", mlrecRoutes);
 app.use("/api/feed", feedRouter);
 
-// generic error handler (replace existing)
+// generic error handler
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err && err.stack ? err.stack : err);
   const status = err?.status || 500;
-  // Don't leak internal messages; return a friendly envelope
   res.status(status).json({
     message: status === 500 ? "Internal Server Error" : err?.message || "Error",
   });
 });
 
-// start server after DB connected
+// Start the HTTP server with Socket.IO after DB connection
 connectDB()
   .then(() => {
-    app.listen(PORT, () =>
-      console.log(`🚀 Server started on http://localhost:${PORT}`)
-    );
+    // create HTTP server for Express app
+    const httpServer = http.createServer(app);
+
+    // configure Socket.IO
+    const io = new IOServer(httpServer, {
+      cors: {
+        origin: process.env.CORS_ORIGIN || "*",
+        methods: ["GET", "POST"],
+        credentials: true,
+      },
+      // optional: adjust pingInterval/pingTimeout or transports if needed
+    });
+
+    // Initialize our socket registry helper
+    initSocket(io);
+
+    // start listening
+    httpServer.listen(PORT, () => {
+      console.log(
+        `🚀 Server (HTTP + Socket.IO) started on http://localhost:${PORT}`
+      );
+    });
   })
   .catch((err) => {
     console.error("Failed to connect DB", err);
-    // decide: exit in production, but in dev we may want to keep process alive
-    process.exit(1); // keep this if you want the process to stop on DB failure
-    // OR: do not exit in dev — comment out the above line
+    process.exit(1);
   });
