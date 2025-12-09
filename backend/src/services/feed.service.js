@@ -1,35 +1,47 @@
 // backend/src/services/feed.service.js
-import RecommenderService from "./recommender.service.js"; // your existing recommender
+import RecommenderService from "./recommender.service.js";
 import TrendingService from "./trending.service.js";
 import SocialService from "./social.service.js";
 import { v4 as uuidv4 } from "uuid";
+import mongoose from "mongoose";
 
 const CANDIDATE_LIMIT = 120;
-const DEFAULT_WEIGHTS = { score: 0.72, recency: 0.28 }; // tune as needed
+const DEFAULT_WEIGHTS = { score: 0.72, recency: 0.28 };
 
 function recencyBoost(createdAt) {
-  // returns value in [0,1], 1 = very recent, decays to 0 by 72 hours
   const ms = Date.now() - new Date(createdAt).getTime();
   const hours = Math.max(0, ms / (1000 * 60 * 60));
-  const halfLife = 36; // tune
-  return Math.max(0, 1 - hours / (halfLife * 2)); // decays to 0 at ~72h
+  const halfLife = 36;
+  return Math.max(0, 1 - hours / (halfLife * 2));
 }
 
 function normalizeBookKey(book) {
-  // prefer _id, fallback to isbn or title-author
   if (!book) return null;
-  if (book._id) return book._id.toString();
+  if (book._id) return String(book._id);
+  if (book.externalId) return String(book.externalId);
   if (book.isbn) return `isbn:${book.isbn}`;
-  return `T:${(book.title || "").slice(0, 60)}|A:${(book.author || "").slice(
-    0,
-    40
-  )}`;
+  return `T:${(book.title || "").slice(0, 60)}|A:${(book.authors
+    ? Array.isArray(book.authors)
+      ? book.authors[0]
+      : book.author
+    : ""
+  ).slice(0, 40)}`;
 }
 
+async function safeCall(fn, ...args) {
+  if (!fn) return [];
+  try {
+    return await fn(...args);
+  } catch (e) {
+    console.error("Feed provider error:", e && e.message ? e.message : e);
+    return [];
+  }
+}
+
+/**
+ * Compose feed by merging providers and ranking
+ */
 export default {
-  /**
-   * Compose feed by calling providers, normalizing, deduping, ranking and paginating.
-   */
   async composeFeed(
     userId,
     {
@@ -39,39 +51,50 @@ export default {
       since,
     } = {}
   ) {
-    // fetch candidates in parallel
-    const calls = [];
-    calls.push(
-      types.includes("personal")
-        ? RecommenderService.getPersonalizedPicks(userId, CANDIDATE_LIMIT)
-        : Promise.resolve([])
-    );
-    calls.push(
-      types.includes("trending")
-        ? TrendingService.getTrendingBooks(CANDIDATE_LIMIT, since)
-        : Promise.resolve([])
-    );
-    calls.push(
-      types.includes("following")
-        ? SocialService.getFollowedUsersUpdates(userId, CANDIDATE_LIMIT, since)
-        : Promise.resolve([])
-    );
+    // call providers (if present)
+    const personalCall = types.includes("personal")
+      ? safeCall(
+          RecommenderService.getPersonalizedPicks,
+          userId,
+          CANDIDATE_LIMIT
+        )
+      : Promise.resolve([]);
 
-    const [personalRaw, trendingRaw, followingRaw] = await Promise.all(calls);
+    const trendingCall = types.includes("trending")
+      ? safeCall(TrendingService.getTrendingBooks, CANDIDATE_LIMIT, since)
+      : Promise.resolve([]);
 
-    // Convert provider outputs to unified FeedItem structure
+    const followingCall = types.includes("following")
+      ? safeCall(
+          SocialService.getFollowedUsersUpdates,
+          userId,
+          CANDIDATE_LIMIT,
+          since
+        )
+      : Promise.resolve([]);
+
+    const [personalRaw, trendingRaw, followingRaw] = await Promise.all([
+      personalCall,
+      trendingCall,
+      followingCall,
+    ]);
+
+    // Normalize provider items to common structure
     const normalize = (arr, type) =>
       (arr || []).map((item) => {
-        // services may return wrapper or book directly
-        const book = item.book || item;
+        // provider may return { book, score, createdAt, reason } OR book document directly
+        const book = item && item.book ? item.book : item;
         const createdAt =
-          item.createdAt || item.updatedAt || book.createdAt || new Date();
-        // score: providers should return score; fallback to default
+          item && (item.createdAt || item.updatedAt)
+            ? item.createdAt || item.updatedAt
+            : book && (book.updatedAt || book.createdAt)
+            ? book.updatedAt || book.createdAt
+            : new Date();
         const score =
-          typeof item.score === "number"
+          typeof (item && item.score) === "number"
             ? item.score
-            : type === "trending"
-            ? item.trendingScore ?? 0.5
+            : item && item.trendingScore
+            ? item.trendingScore
             : 0.5;
         return {
           id: uuidv4(),
@@ -89,9 +112,7 @@ export default {
       ...normalize(followingRaw, "following"),
     ];
 
-    // Deduplicate by book key. Preference rules:
-    // - Prefer 'following' (social) over other types for same book
-    // - Otherwise pick item with higher score
+    // Deduplicate by book key; prefer following over others, then by score
     const map = new Map();
     for (const it of items) {
       const key = normalizeBookKey(it.book);
@@ -102,7 +123,7 @@ export default {
         if (it.type === "following" && existing.type !== "following") {
           map.set(key, it);
         } else if (existing.type === "following" && it.type !== "following") {
-          // keep existing following
+          // keep existing
         } else if ((it.score ?? 0) > (existing.score ?? 0)) {
           map.set(key, it);
         }
@@ -111,7 +132,7 @@ export default {
 
     items = Array.from(map.values());
 
-    // Compute rank: combine provider score and recency boost
+    // rank
     items = items.map((it) => {
       const rBoost = recencyBoost(it.createdAt);
       const rank =
@@ -120,37 +141,36 @@ export default {
       return { ...it, rank, rBoost };
     });
 
-    // Sort by rank desc, then by createdAt desc
     items.sort((a, b) => {
       if (b.rank !== a.rank) return b.rank - a.rank;
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
 
-    // Pagination
     const total = items.length;
     const start = (page - 1) * limit;
     const paged = items.slice(start, start + limit);
 
-    // Return minimal book fields to frontend (avoid huge payloads)
-    const minimalItems = paged.map((it) => ({
-      id: it.id,
-      type: it.type,
-      score: it.score,
-      rank: it.rank,
-      createdAt: it.createdAt,
-      reason: it.raw?.reason || null,
-      book: {
-        _id: it.book._id,
-        title: it.book.title,
-        authors: it.book.authors || it.book.author,
-        coverUrl: it.book.coverUrl || it.book.image,
-        avgRating: it.book.avgRating,
-        genres: it.book.genres || [],
-      },
-      meta: {
-        providerRaw: it.raw,
-      },
-    }));
+    const minimalItems = paged.map((it) => {
+      const b = it.book || {};
+      return {
+        id: it.id,
+        type: it.type,
+        score: it.score,
+        rank: it.rank,
+        createdAt: it.createdAt,
+        reason: it.raw?.reason || null,
+        book: {
+          _id: b._id,
+          externalId: b.externalId,
+          title: b.title,
+          authors: b.authors || b.author || [],
+          coverUrl: b.cover || b.coverUrl || null,
+          avgRating: b.avgRating || null,
+          genres: b.genres || [],
+        },
+        meta: { providerRaw: it.raw || null },
+      };
+    });
 
     return { page, limit, total, items: minimalItems };
   },
