@@ -251,17 +251,43 @@ async function getPersonalizedPicks(userId, limit = DEFAULT_LIMIT) {
     .lean();
   const bookMap = new Map(books.map((b) => [String(b._id), b]));
 
+  // --- paste this IN PLACE OF the existing scored = ... block ---
   const scored = candidates
     .map((c) => {
       const book = bookMap.get(c.bookId);
       if (!book) return null;
+
       const score = scoreCandidate(c);
-      const reason = `cf_cooccur:${Math.round(c.count)}`;
+
+      // friendly reason message:
+      // try to find a seed book title from the user's reviewed list (if available)
+      let seedTitle = null;
+      try {
+        // 'reviewed' is from getUserInteractions earlier in this function
+        if (Array.isArray(reviewed)) {
+          const found = reviewed.find((r) => {
+            // r.book may be an ObjectId or object depending on schema/use;
+            // normalize to string compare
+            const rb = r.book ? String(r.book) : null;
+            return rb === String(c.bookId);
+          });
+          if (found && found.title) seedTitle = found.title;
+        }
+      } catch (e) {
+        // ignore if reviewed structure differs
+      }
+
+      const reason = seedTitle
+        ? `Because you read "${seedTitle}"`
+        : `Because you read a similar book`;
+
       const createdAt =
         book.updatedAt || book.createdAt || c.lastInteraction || new Date();
+
       return { book, score, reason, createdAt };
     })
     .filter(Boolean);
+  // --- end paste ---
 
   scored.sort(
     (a, b) => b.score - a.score || new Date(b.createdAt) - new Date(a.createdAt)

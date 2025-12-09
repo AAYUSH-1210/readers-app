@@ -1,5 +1,6 @@
 // backend/src/controllers/feed.controller.js
 import FeedService from "../services/feed.service.js";
+import User from "../models/User.js";
 
 export async function getFeed(req, res) {
   try {
@@ -17,11 +18,53 @@ export async function getFeed(req, res) {
       types,
       since,
     });
-    return res.json(result);
+
+    // compute unreadCount if since provided or if user has lastFeedSeen
+    let unreadCount = 0;
+    if (req.query.since) {
+      const sinceDate = new Date(req.query.since);
+      unreadCount = result.items.filter(
+        (it) => new Date(it.createdAt) > sinceDate
+      ).length;
+    } else if (req.user && req.user.id) {
+      const me = await User.findById(req.user.id).select("lastFeedSeen").lean();
+      if (me && me.lastFeedSeen) {
+        unreadCount = result.items.filter(
+          (it) => new Date(it.createdAt) > new Date(me.lastFeedSeen)
+        ).length;
+      }
+    }
+
+    return res.json({ ...result, unreadCount });
   } catch (err) {
     console.error("FeedController error", err);
     return res
       .status(500)
       .json({ message: "Failed to generate feed", error: err.message });
+  }
+}
+
+export async function getPreview(req, res) {
+  try {
+    const userId = req.user?.id || null;
+    const result = await FeedService.composeFeed(userId, {
+      page: 1,
+      limit: 6,
+      types: ["personal", "trending", "following"],
+    });
+    return res.json({ items: result.items, total: result.total });
+  } catch (e) {
+    console.error("getPreview error", e);
+    res.status(500).json({ message: "preview failed" });
+  }
+}
+
+export async function markFeedSeen(req, res) {
+  try {
+    const userId = req.user.id;
+    await User.findByIdAndUpdate(userId, { lastFeedSeen: new Date() });
+    res.json({ success: true });
+  } catch (e) {
+    next(e);
   }
 }

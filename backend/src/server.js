@@ -83,7 +83,7 @@ app.use((err, req, res, next) => {
 // Start the HTTP server with Socket.IO after DB connection
 connectDB()
   .then(() => {
-    // create HTTP server for Express app
+    // create an HTTP server from Express app so we can attach socket.io
     const httpServer = http.createServer(app);
 
     // configure Socket.IO
@@ -93,20 +93,58 @@ connectDB()
         methods: ["GET", "POST"],
         credentials: true,
       },
-      // optional: adjust pingInterval/pingTimeout or transports if needed
+      // transports: ["websocket", "polling"], // adjust if needed
     });
 
-    // Initialize our socket registry helper
-    initSocket(io);
+    // initialize your socket handling (this should set io in a module-level helper)
+    try {
+      initSocket(io);
+      console.log("Socket.IO initialized");
+    } catch (e) {
+      console.error("initSocket failed:", e && e.stack ? e.stack : e);
+    }
 
-    // start listening
+    // start listening and handle listen errors gracefully
+    httpServer.on("error", (err) => {
+      if (err && err.code === "EADDRINUSE") {
+        console.error(
+          `Port ${PORT} is already in use. Kill the process using it or change PORT.`
+        );
+      } else {
+        console.error("HTTP server error:", err && err.stack ? err.stack : err);
+      }
+      process.exit(1);
+    });
+
     httpServer.listen(PORT, () => {
       console.log(
         `🚀 Server (HTTP + Socket.IO) started on http://localhost:${PORT}`
       );
     });
+
+    // graceful shutdown helpers
+    const shutdown = (signal) => {
+      console.log(`Received ${signal}. Shutting down server...`);
+      httpServer.close((err) => {
+        if (err) {
+          console.error("Error closing HTTP server:", err);
+          process.exit(1);
+        }
+        // close DB connection if your connectDB exposes it, otherwise rely on process exit
+        console.log("HTTP server closed. Exiting process.");
+        process.exit(0);
+      });
+      // force exit after timeout
+      setTimeout(() => {
+        console.warn("Forcing exit after 10s");
+        process.exit(1);
+      }, 10_000).unref();
+    };
+
+    process.on("SIGINT", () => shutdown("SIGINT"));
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
   })
   .catch((err) => {
-    console.error("Failed to connect DB", err);
+    console.error("Failed to connect DB", err && err.stack ? err.stack : err);
     process.exit(1);
   });
