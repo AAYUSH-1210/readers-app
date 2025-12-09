@@ -43,6 +43,9 @@ const NoteSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
+
+    // denormalized comment count
+    commentsCount: { type: Number, default: 0, index: true },
   },
   { timestamps: true }
 );

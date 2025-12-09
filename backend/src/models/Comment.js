@@ -10,7 +10,6 @@ const CommentSchema = new mongoose.Schema(
       index: true,
     },
 
-    // targetType: what this comment is attached to
     // allowed: 'book', 'review', 'note'
     targetType: {
       type: String,
@@ -44,6 +43,15 @@ const CommentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// compound index to speed up the common query used by getCommentsByTarget
+CommentSchema.index({
+  targetType: 1,
+  targetId: 1,
+  parent: 1,
+  deleted: 1,
+  createdAt: -1,
+});
 
 const Comment =
   mongoose.models.Comment || mongoose.model("Comment", CommentSchema);

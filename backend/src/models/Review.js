@@ -15,6 +15,10 @@ const ReviewSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+
+    // denormalized comment count
+    commentsCount: { type: Number, default: 0, index: true },
+
     // keep externalId for safe querying when book wasn't resolved, but book ref is authoritative
     externalId: { type: String, required: true, index: true },
 

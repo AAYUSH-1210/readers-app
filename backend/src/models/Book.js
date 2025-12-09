@@ -11,6 +11,9 @@ const BookSchema = new mongoose.Schema(
     raw: { type: mongoose.Schema.Types.Mixed },
     description: { type: String, default: null },
 
+    // denormalized comment count
+    commentsCount: { type: Number, default: 0, index: true },
+
     embedding: { type: [Number], default: undefined },
     embeddingModel: { type: String, default: null },
   },

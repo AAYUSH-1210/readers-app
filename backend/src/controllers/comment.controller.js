@@ -1,3 +1,4 @@
+// backend/src/controllers/comment.controller.js
 import mongoose from "mongoose";
 import Comment from "../models/Comment.js";
 import User from "../models/User.js";
@@ -7,12 +8,10 @@ import Note from "../models/Note.js";
 import { logActivity } from "../utils/activityLogger.js";
 
 /* Helper: validate target exists (best-effort) */
-/* Helper: validate target exists (best-effort) */
 async function targetExists(targetType, targetId) {
   if (!targetType || !targetId) return false;
 
   if (targetType === "book") {
-    // If looks like an ObjectId, check _id; otherwise check externalId
     if (mongoose.isValidObjectId(targetId)) {
       return Boolean(await Book.exists({ _id: targetId }));
     } else {
@@ -45,33 +44,50 @@ export async function addComment(req, res, next) {
         .status(400)
         .json({ message: "targetType, targetId and text required" });
 
-    // If target is book and targetId looks like an externalId (starts with / or not an ObjectId),
-    // try to resolve it to the book _id
-    if (targetType === "book") {
-      if (!mongoose.isValidObjectId(targetId)) {
-        // maybe targetId is externalId
-        const b =
-          (await Book.findOne({ externalId: targetId })) ||
-          (externalId ? await Book.findOne({ externalId }) : null);
-        if (b) {
-          targetId = b._id;
-        }
-      }
+    // Resolve book externalId -> _id if necessary
+    if (targetType === "book" && !mongoose.isValidObjectId(targetId)) {
+      const b =
+        (await Book.findOne({ externalId: targetId })) ||
+        (externalId ? await Book.findOne({ externalId }) : null);
+      if (b) targetId = b._id;
     }
 
-    // basic target check (now targetId may be an ObjectId)
+    // validate target exists
     const ok = await targetExists(targetType, targetId);
-    if (!ok) {
-      return res.status(404).json({ message: "Target not found" });
-    }
+    if (!ok) return res.status(404).json({ message: "Target not found" });
 
-    // if parent given, ensure parent exists
+    // if parent given, ensure parent exists and belongs to same target
     if (parent) {
       const p = await Comment.findById(parent);
       if (!p)
         return res.status(404).json({ message: "Parent comment not found" });
+      // optional: ensure parent.targetType/targetId match provided target
+      if (
+        String(p.targetType) !== String(targetType) ||
+        String(p.targetId) !== String(targetId)
+      ) {
+        return res
+          .status(400)
+          .json({ message: "Parent comment target mismatch" });
+      }
     }
 
+    // Prevent rapid duplicate comments (5 minute window)
+    const duplicate = await Comment.findOne({
+      user: userId,
+      targetType,
+      targetId,
+      text,
+      createdAt: { $gt: new Date(Date.now() - 1000 * 60 * 5) }, // 5 minutes
+    });
+    if (duplicate) {
+      return res.status(429).json({
+        message:
+          "Duplicate comment detected — try editing your previous comment.",
+      });
+    }
+
+    // create comment
     const comment = await Comment.create({
       user: userId,
       targetType,
@@ -91,15 +107,32 @@ export async function addComment(req, res, next) {
 
     await comment.populate("user", "name username avatarUrl");
 
-    // activity
+    // increment commentsCount on parent target (best-effort)
+    const modelMap = { book: Book, review: Review, note: Note };
+    const TargetModel = modelMap[targetType];
+    if (TargetModel && mongoose.isValidObjectId(String(targetId))) {
+      try {
+        await TargetModel.findByIdAndUpdate(targetId, {
+          $inc: { commentsCount: 1 },
+        });
+      } catch (err) {
+        console.error("Failed to increment commentsCount", err);
+      }
+    }
+
+    // activity log
     logActivity({
       user: userId,
-      type: "note", // or "comment" if you extend activity enums
+      type: "comment",
       action: "created",
-      meta: { targetType, targetId: String(comment.targetId) },
+      meta: {
+        targetType,
+        targetId: String(comment.targetId),
+        commentId: comment._id,
+      },
     });
 
-    res.status(201).json({ comment });
+    return res.status(201).json({ comment });
   } catch (err) {
     next(err);
   }
@@ -119,13 +152,9 @@ export async function getCommentsByTarget(req, res, next) {
     if (targetType === "book" && !mongoose.isValidObjectId(targetId)) {
       const b = await Book.findOne({ externalId: targetId });
       if (b) targetId = b._id;
-      else {
-        // no book found — return empty set
-        return res.json({ page, limit, total: 0, comments: [] });
-      }
+      else return res.json({ page, limit, total: 0, comments: [] });
     }
 
-    // get top-level comments (parent == null)
     const [comments, total] = await Promise.all([
       Comment.find({ targetType, targetId, parent: null, deleted: false })
         .sort({ createdAt: -1 })
@@ -142,9 +171,11 @@ export async function getCommentsByTarget(req, res, next) {
 
     // fetch replies for these comments
     const ids = comments.map((c) => c._id);
-    const replies = await Comment.find({ parent: { $in: ids }, deleted: false })
-      .sort({ createdAt: 1 })
-      .populate("user", "name username avatarUrl");
+    const replies = ids.length
+      ? await Comment.find({ parent: { $in: ids }, deleted: false })
+          .sort({ createdAt: 1 })
+          .populate("user", "name username avatarUrl")
+      : [];
 
     // group replies by parent id
     const replyMap = {};
@@ -188,7 +219,7 @@ export async function updateComment(req, res, next) {
     // activity
     logActivity({
       user: userId,
-      type: "note",
+      type: "comment",
       action: "updated",
       meta: { commentId: id },
     });
@@ -215,10 +246,23 @@ export async function deleteComment(req, res, next) {
     comment.text = "[deleted]";
     await comment.save();
 
+    // decrement commentsCount on parent target (best-effort)
+    const modelMap = { book: Book, review: Review, note: Note };
+    const TargetModel = modelMap[comment.targetType];
+    if (TargetModel && mongoose.isValidObjectId(String(comment.targetId))) {
+      try {
+        await TargetModel.findByIdAndUpdate(comment.targetId, {
+          $inc: { commentsCount: -1 },
+        });
+      } catch (err) {
+        console.error("Failed to decrement commentsCount", err);
+      }
+    }
+
     // activity
     logActivity({
       user: userId,
-      type: "note",
+      type: "comment",
       action: "deleted",
       meta: { commentId: id },
     });
