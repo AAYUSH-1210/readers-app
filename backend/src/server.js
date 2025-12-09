@@ -24,6 +24,7 @@ import likeRoutes from "./routes/like.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
 import recommendRoutes from "./routes/recommend.routes.js";
 import mlrecRoutes from "./routes/mlrec.routes.js";
+import feedRouter from "./routes/feed.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -56,6 +57,7 @@ app.use("/api/likes", likeRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/recommend", recommendRoutes);
 app.use("/api/mlrec", mlrecRoutes);
+app.use("/api/feed", feedRouter);
 
 // generic error handler
 app.use((err, req, res, next) => {
