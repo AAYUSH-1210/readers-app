@@ -38,6 +38,7 @@ import exportRoutes from "./routes/export.routes.js";
 import importRoutes from "./routes/import.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import bookClubRoutes from "./routes/bookclub.routes.js";
+import bookclubDiscussionRoutes from "./routes/bookclubDiscussion.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -86,6 +87,7 @@ app.use("/api/export", exportRoutes);
 app.use("/api/import", importRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/bookclubs", bookClubRoutes);
+app.use("/api", bookclubDiscussionRoutes);
 
 /* -------------------- ERROR HANDLER -------------------- */
 
