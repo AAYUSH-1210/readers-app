@@ -33,6 +33,7 @@ import recommendRoutes from "./routes/recommend.routes.js";
 import mlrecRoutes from "./routes/mlrec.routes.js";
 import feedRouter from "./routes/feed.routes.js";
 import trendingRouter from "./routes/trending.routes.js";
+import analyticsRoutes from "./routes/analytics.routes.js";
 
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
@@ -76,6 +77,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/recommend", recommendRoutes);
 app.use("/api/mlrec", mlrecRoutes);
 app.use("/api/feed", feedRouter);
+app.use("/api/analytics", analyticsRoutes);
 
 /* -------------------- ERROR HANDLER -------------------- */
 
