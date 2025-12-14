@@ -136,3 +136,67 @@ export async function getReadingStreaks(req, res, next) {
     next(err);
   }
 }
+
+export async function getReadingHeatmap(req, res, next) {
+  try {
+    const userId = req.user.id;
+    const days = Math.min(
+      365,
+      Math.max(30, parseInt(req.query.days || "180", 10))
+    );
+
+    const to = new Date();
+    const from = new Date();
+    from.setDate(to.getDate() - days + 1);
+
+    // Aggregate reading activity per day
+    const rows = await Reading.aggregate([
+      {
+        $match: {
+          user: req.user._id,
+          updatedAt: { $gte: from, $lte: to },
+        },
+      },
+      {
+        $project: {
+          day: {
+            $dateToString: { format: "%Y-%m-%d", date: "$updatedAt" },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$day",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // Convert to map for easy lookup
+    const map = {};
+    rows.forEach((r) => {
+      map[r._id] = r.count;
+    });
+
+    // Fill missing days with count = 0
+    const daysArray = [];
+    const cursor = new Date(from);
+
+    while (cursor <= to) {
+      const key = cursor.toISOString().slice(0, 10);
+      daysArray.push({
+        date: key,
+        count: map[key] || 0,
+      });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    res.json({
+      from: from.toISOString().slice(0, 10),
+      to: to.toISOString().slice(0, 10),
+      days: daysArray,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
