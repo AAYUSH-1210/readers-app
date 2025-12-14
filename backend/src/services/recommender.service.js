@@ -3,7 +3,6 @@
 
 import mongoose from "mongoose";
 import Book from "../models/Book.js";
-import User from "../models/User.js";
 import Review from "../models/Review.js";
 import Reading from "../models/Reading.js";
 import Shelf from "../models/Shelf.js";
@@ -18,11 +17,9 @@ function daysAgoDate(days) {
   return d;
 }
 
-/**
- * Gather books the user has interacted with: reviewed, reading entries, shelf items.
- * Returns:
- * { reviewed: [...reviews], readings: [...readings], shelfItems: [...], interactedBookIds: [idStrings] }
- */
+/* -------------------------
+   USER INTERACTIONS
+------------------------- */
 async function getUserInteractions(userId) {
   if (!userId)
     return {
@@ -32,24 +29,20 @@ async function getUserInteractions(userId) {
       interactedBookIds: [],
     };
 
-  // Reviews (your schema: user, book)
   const reviewed = await Review.find({ user: userId })
     .select("book createdAt rating")
     .lean();
 
-  // Readings (may exist)
   let readings = [];
   try {
     readings = await Reading.find({ user: userId })
       .select("book status updatedAt createdAt")
       .lean();
-  } catch (e) {
-    readings = [];
-  }
+  } catch {}
 
-  // Shelves -> shelf items
   const shelves = await Shelf.find({ user: userId }).select("_id").lean();
-  const shelfIds = (shelves || []).map((s) => s._id);
+  const shelfIds = shelves.map((s) => s._id);
+
   let shelfItems = [];
   if (shelfIds.length) {
     shelfItems = await ShelfItem.find({ shelf: { $in: shelfIds } })
@@ -60,7 +53,7 @@ async function getUserInteractions(userId) {
   const set = new Set();
   reviewed.forEach((r) => r.book && set.add(String(r.book)));
   readings.forEach((r) => r.book && set.add(String(r.book)));
-  shelfItems.forEach((si) => si.book && set.add(String(si.book)));
+  shelfItems.forEach((s) => s.book && set.add(String(s.book)));
 
   return {
     reviewed,
@@ -70,20 +63,19 @@ async function getUserInteractions(userId) {
   };
 }
 
-/**
- * Find similar users who reviewed the same seed books recently.
- * Returns array of userIds (strings) excluding excludeUserId.
- */
+/* -------------------------
+   SIMILAR USERS
+------------------------- */
 async function getSimilarUsers(seedBookIds, excludeUserId, limit = 200) {
-  if (!seedBookIds || seedBookIds.length === 0) return [];
+  if (!seedBookIds.length) return [];
 
   const since = daysAgoDate(RECENT_WINDOW_DAYS);
-  // Use Review collection: fields are { user, book, createdAt }
-  const pipeline = [
+
+  const rows = await Review.aggregate([
     {
       $match: {
         book: {
-          $in: seedBookIds.map((id) => new mongoose.Types.ObjectId(String(id))),
+          $in: seedBookIds.map((id) => new mongoose.Types.ObjectId(id)),
         },
         createdAt: { $gte: since },
       },
@@ -91,227 +83,129 @@ async function getSimilarUsers(seedBookIds, excludeUserId, limit = 200) {
     { $group: { _id: "$user", commonCount: { $sum: 1 } } },
     { $sort: { commonCount: -1 } },
     { $limit: limit },
-    { $project: { userId: "$_id", commonCount: 1, _id: 0 } },
-  ];
+  ]);
 
-  const rows = await Review.aggregate(pipeline).exec();
-  const userIds = rows
-    .map((r) => String(r.userId))
-    .filter((uid) => uid !== String(excludeUserId));
-  return userIds;
+  return rows
+    .map((r) => String(r._id))
+    .filter((id) => id !== String(excludeUserId));
 }
 
-/**
- * Collect candidate books from similar users (recent reviews + readings).
- * Returns array of candidates { bookId, count, ratingSum, lastInteraction } sorted by count desc.
- */
+/* -------------------------
+   CANDIDATE COLLECTION
+------------------------- */
 async function collectCandidateBooks(similarUserIds, excludeBookIds) {
-  if (!similarUserIds || similarUserIds.length === 0) return [];
+  if (!similarUserIds.length) return [];
 
   const since = daysAgoDate(RECENT_WINDOW_DAYS);
-  const candCounts = new Map();
+  const map = new Map();
 
-  // Reviews by similar users
-  const revs = await Review.find({
-    user: {
-      $in: similarUserIds.map((id) => new mongoose.Types.ObjectId(String(id))),
-    },
+  const reviews = await Review.find({
+    user: { $in: similarUserIds },
     createdAt: { $gte: since },
   })
-    .select("book rating createdAt user")
+    .select("book rating createdAt")
     .lean();
 
-  for (const r of revs) {
-    const bookId = String(r.book);
-    if (excludeBookIds.includes(bookId)) continue;
-    const entry = candCounts.get(bookId) || {
+  for (const r of reviews) {
+    const id = String(r.book);
+    if (excludeBookIds.includes(id)) continue;
+
+    const entry = map.get(id) || {
       count: 0,
       ratingSum: 0,
       lastInteraction: new Date(0),
     };
+
     entry.count += 1;
-    entry.ratingSum += typeof r.rating === "number" ? r.rating : 0;
-    const t = r.createdAt || new Date();
-    if (t > entry.lastInteraction) entry.lastInteraction = t;
-    candCounts.set(bookId, entry);
+    entry.ratingSum += r.rating || 0;
+    entry.lastInteraction =
+      r.createdAt > entry.lastInteraction ? r.createdAt : entry.lastInteraction;
+
+    map.set(id, entry);
   }
 
-  // Readings by similar users (if Reading exists)
-  try {
-    const reads = await Reading.find({
-      user: {
-        $in: similarUserIds.map(
-          (id) => new mongoose.Types.ObjectId(String(id))
-        ),
-      },
-      updatedAt: { $gte: since },
-    })
-      .select("book updatedAt createdAt")
-      .lean();
-
-    for (const r of reads) {
-      const bookId = String(r.book);
-      if (excludeBookIds.includes(bookId)) continue;
-      const entry = candCounts.get(bookId) || {
-        count: 0,
-        ratingSum: 0,
-        lastInteraction: new Date(0),
-      };
-      entry.count += 0.6; // reading weighs less than review
-      const t = r.updatedAt || r.createdAt || new Date();
-      if (t > entry.lastInteraction) entry.lastInteraction = t;
-      candCounts.set(bookId, entry);
-    }
-  } catch (e) {
-    // ignore if Reading not present
-  }
-
-  const cands = Array.from(candCounts.entries()).map(([bookId, v]) => ({
+  return Array.from(map.entries()).map(([bookId, v]) => ({
     bookId,
     count: v.count,
     avgRating: v.ratingSum / Math.max(1, v.count),
     lastInteraction: v.lastInteraction,
   }));
-
-  cands.sort((a, b) => b.count - a.count);
-  return cands;
 }
 
-function scoreCandidate(candidate) {
-  const freq = Math.min(1, candidate.count / 10);
-  const rating = Math.min(1, (candidate.avgRating || 0) / 5);
-  const recencyHours =
-    (Date.now() - new Date(candidate.lastInteraction).getTime()) /
-    (1000 * 60 * 60);
-  const recency = Math.max(0, 1 - recencyHours / (24 * 90));
-  return 0.55 * freq + 0.3 * rating + 0.15 * recency;
+function scoreCandidate(c) {
+  const freq = Math.min(1, c.count / 10);
+  const rating = Math.min(1, (c.avgRating || 0) / 5);
+  return 0.7 * freq + 0.3 * rating;
 }
 
-/**
- * getPersonalizedPicks(userId, limit)
- * returns array of { book, score, reason, createdAt }
- */
+/* -------------------------
+   MAIN API
+------------------------- */
 async function getPersonalizedPicks(userId, limit = DEFAULT_LIMIT) {
   if (!userId) return [];
 
-  const { interactedBookIds, reviewed, readings, shelfItems } =
-    await getUserInteractions(userId);
+  const { interactedBookIds } = await getUserInteractions(userId);
 
-  // fallback if no history
-  if (!interactedBookIds || interactedBookIds.length === 0) {
-    const popular = await Book.find({})
+  /* 🧊 Cold start */
+  if (!interactedBookIds.length) {
+    const books = await Book.find({})
       .sort({ avgRating: -1 })
       .limit(limit)
       .lean();
-    return popular.map((b) => ({
+
+    return books.map((b) => ({
       book: b,
       score: (b.avgRating || 0) / 5,
-      reason: "popular_fallback",
-      createdAt: b.updatedAt || b.createdAt || new Date(),
+      reason: "Popular among readers like you",
+      createdAt: b.updatedAt || b.createdAt,
     }));
   }
 
-  const seedBookIds = interactedBookIds.slice(0, 20);
+  const similarUsers = await getSimilarUsers(
+    interactedBookIds.slice(0, 20),
+    userId
+  );
 
-  const similarUserIds = await getSimilarUsers(seedBookIds, userId, 500);
-  if (!similarUserIds.length) {
-    // fallback
+  if (!similarUsers.length) {
     const fallback = await Book.find({ _id: { $nin: interactedBookIds } })
       .limit(limit)
       .lean();
+
     return fallback.map((b) => ({
       book: b,
       score: (b.avgRating || 0) / 5,
-      reason: "fallback_popular",
-      createdAt: b.updatedAt || b.createdAt || new Date(),
+      reason: "Recommended because you enjoyed similar books",
+      createdAt: b.updatedAt || b.createdAt,
     }));
   }
 
   const candidates = await collectCandidateBooks(
-    similarUserIds,
+    similarUsers,
     interactedBookIds
   );
-  if (!candidates.length) {
-    const fallback = await Book.find({ _id: { $nin: interactedBookIds } })
-      .limit(limit)
-      .lean();
-    return fallback.map((b) => ({
-      book: b,
-      score: (b.avgRating || 0) / 5,
-      reason: "fallback_popular",
-      createdAt: b.updatedAt || b.createdAt || new Date(),
-    }));
-  }
 
-  const bookIds = candidates.map((c) => new mongoose.Types.ObjectId(c.bookId));
-  const books = await Book.find({ _id: { $in: bookIds } })
-    .select(
-      "title authors cover externalId avgRating genres updatedAt createdAt"
-    )
-    .lean();
-  const bookMap = new Map(books.map((b) => [String(b._id), b]));
+  const books = await Book.find({
+    _id: { $in: candidates.map((c) => c.bookId) },
+  }).lean();
 
-  // --- paste this IN PLACE OF the existing scored = ... block ---
-  const scored = candidates
+  const map = new Map(books.map((b) => [String(b._id), b]));
+
+  return candidates
     .map((c) => {
-      const book = bookMap.get(c.bookId);
+      const book = map.get(c.bookId);
       if (!book) return null;
 
-      const score = scoreCandidate(c);
-
-      // friendly reason message:
-      // try to find a seed book title from the user's reviewed list (if available)
-      let seedTitle = null;
-      try {
-        // 'reviewed' is from getUserInteractions earlier in this function
-        if (Array.isArray(reviewed)) {
-          const found = reviewed.find((r) => {
-            // r.book may be an ObjectId or object depending on schema/use;
-            // normalize to string compare
-            const rb = r.book ? String(r.book) : null;
-            return rb === String(c.bookId);
-          });
-          if (found && found.title) seedTitle = found.title;
-        }
-      } catch (e) {
-        // ignore if reviewed structure differs
-      }
-
-      const reason = seedTitle
-        ? `Because you read "${seedTitle}"`
-        : `Because you read a similar book`;
-
-      const createdAt =
-        book.updatedAt || book.createdAt || c.lastInteraction || new Date();
-
-      return { book, score, reason, createdAt };
+      return {
+        book,
+        score: scoreCandidate(c),
+        reason: "Readers with similar taste also liked this",
+        createdAt: book.updatedAt || book.createdAt,
+      };
     })
-    .filter(Boolean);
-  // --- end paste ---
-
-  scored.sort(
-    (a, b) => b.score - a.score || new Date(b.createdAt) - new Date(a.createdAt)
-  );
-  return scored.slice(0, limit);
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 }
 
-// optional: simple taste vector (genre distribution)
-async function getUserTasteVector(userId) {
-  const { interactedBookIds } = await getUserInteractions(userId);
-  if (!interactedBookIds.length) return {};
-  const books = await Book.find({ _id: { $in: interactedBookIds } })
-    .select("genres")
-    .lean();
-  const counts = {};
-  for (const b of books) {
-    const genres = b.genres || [];
-    genres.forEach((g) => (counts[g] = (counts[g] || 0) + 1));
-  }
-  const total = Object.values(counts).reduce((s, v) => s + v, 0) || 1;
-  const vector = {};
-  for (const k of Object.keys(counts)) vector[k] = counts[k] / total;
-  return vector;
-}
-
-export default { getPersonalizedPicks, getUserTasteVector };
-export { getPersonalizedPicks, getUserTasteVector };
+export default { getPersonalizedPicks };
+export { getPersonalizedPicks };
