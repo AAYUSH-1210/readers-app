@@ -79,3 +79,59 @@ export async function markFeedSeen(req, res, next) {
     next(e);
   }
 }
+
+// ADD THIS FUNCTION at the bottom of the file
+
+export async function getHomeFeed(req, res) {
+  try {
+    const userId = req.user.id;
+
+    // Fixed homepage limits
+    const SECTION_LIMITS = {
+      trending: 10,
+      personal: 10,
+      following: 10,
+    };
+
+    // Fetch a combined feed once (reuse existing logic)
+    const result = await FeedService.composeFeed(userId, {
+      page: 1,
+      limit: 50, // fetch enough items to split safely
+      types: ["personal", "trending", "following"],
+    });
+
+    const sections = {
+      trending: [],
+      recommended: [],
+      following: [],
+    };
+
+    for (const item of result.items) {
+      if (
+        item.source === "trending" &&
+        sections.trending.length < SECTION_LIMITS.trending
+      ) {
+        sections.trending.push(item);
+      }
+
+      if (
+        item.source === "personal" &&
+        sections.recommended.length < SECTION_LIMITS.personal
+      ) {
+        sections.recommended.push(item);
+      }
+
+      if (
+        item.source === "following" &&
+        sections.following.length < SECTION_LIMITS.following
+      ) {
+        sections.following.push(item);
+      }
+    }
+
+    return res.json(sections);
+  } catch (err) {
+    console.error("getHomeFeed error", err && err.stack ? err.stack : err);
+    return res.status(500).json({ message: "Failed to load home feed" });
+  }
+}
