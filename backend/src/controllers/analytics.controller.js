@@ -1,4 +1,5 @@
 import Reading from "../models/Reading.js";
+import mongoose from "mongoose";
 
 /**
  * GET /api/analytics/reading/summary
@@ -36,7 +37,7 @@ export async function getMonthlyReadingStats(req, res, next) {
     const data = await Reading.aggregate([
       {
         $match: {
-          user: Reading.db.Types.ObjectId(userId),
+          user: new mongoose.Types.ObjectId(userId),
           status: "finished",
         },
       },
@@ -153,7 +154,7 @@ export async function getReadingHeatmap(req, res, next) {
     const rows = await Reading.aggregate([
       {
         $match: {
-          user: req.user._id,
+          user: new mongoose.Types.ObjectId(userId),
           updatedAt: { $gte: from, $lte: to },
         },
       },
