@@ -3,13 +3,16 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import jwt from "jsonwebtoken";
-import { setIo } from "./utils/socket.js";
 import express from "express";
 import cors from "cors";
 import http from "http";
 import { Server as IOServer } from "socket.io";
-import { connectDB } from "./config/db.js";
 
+import { connectDB } from "./config/db.js";
+import { initSocket } from "./utils/socketService.js";
+import { setIo } from "./utils/socket.js";
+
+// Routes
 import authRoutes from "./routes/auth.routes.js";
 import bookRoutes from "./routes/book.routes.js";
 import readingRoutes from "./routes/reading.routes.js";
@@ -31,57 +34,14 @@ import mlrecRoutes from "./routes/mlrec.routes.js";
 import feedRouter from "./routes/feed.routes.js";
 import trendingRouter from "./routes/trending.routes.js";
 
-import { initSocket } from "./utils/socketService.js";
-
 console.log("MONGO_URI present?", Boolean(process.env.MONGO_URI));
 console.log("JWT_SECRET present?", Boolean(process.env.JWT_SECRET));
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-io.use((socket, next) => {
-  try {
-    // client should send { auth: { token } } or ?token= in query
-    const token =
-      socket.handshake?.auth?.token || socket.handshake?.query?.token;
-    if (!token) {
-      // reject unauthenticated sockets by default
-      return next(new Error("auth error: token required"));
-    }
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    // Standardize user id field (support id, userId, _id)
-    const userId = payload?.id || payload?.userId || payload?._id;
-    if (!userId) return next(new Error("auth error: invalid token payload"));
-    socket.user = { id: String(userId), ...payload };
-    return next();
-  } catch (err) {
-    console.error(
-      "socket auth failed:",
-      err && err.message ? err.message : err
-    );
-    return next(new Error("auth error"));
-  }
-});
+/* -------------------- MIDDLEWARE -------------------- */
 
-// initialize your socket handling
-try {
-  // init socketService (this will also call setIo internally)
-  initSocket(io);
-  // also set global io in socket.js (safe no-op if already set)
-  try {
-    setIo(io);
-  } catch (e) {
-    console.warn(
-      "setIo call failed (non-fatal)",
-      e && e.message ? e.message : e
-    );
-  }
-  console.log("Socket.IO initialized with JWT handshake auth");
-} catch (e) {
-  console.error("initSocket failed:", e && e.stack ? e.stack : e);
-}
-
-// configure CORS for HTTP routes
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN || true,
@@ -90,10 +50,12 @@ app.use(
 );
 app.use(express.json());
 
-// health
+/* -------------------- HEALTH -------------------- */
+
 app.get("/", (req, res) => res.send("📚 Readers API running"));
 
-// mount routes (ensure each route file uses `export default router;`)
+/* -------------------- ROUTES -------------------- */
+
 app.use("/api/auth", authRoutes);
 app.use("/api/books/trending", trendingRouter);
 app.use("/api/books", bookRoutes);
@@ -115,80 +77,58 @@ app.use("/api/recommend", recommendRoutes);
 app.use("/api/mlrec", mlrecRoutes);
 app.use("/api/feed", feedRouter);
 
-// generic error handler
+/* -------------------- ERROR HANDLER -------------------- */
+
 app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err && err.stack ? err.stack : err);
-  const status = err?.status || 500;
-  res.status(status).json({
-    message: status === 500 ? "Internal Server Error" : err?.message || "Error",
+  console.error("Unhandled error:", err);
+  res.status(err?.status || 500).json({
+    message: err?.message || "Internal Server Error",
   });
 });
 
-// Start the HTTP server with Socket.IO after DB connection
+/* -------------------- START SERVER -------------------- */
+
 connectDB()
   .then(() => {
-    // create an HTTP server from Express app so we can attach socket.io
     const httpServer = http.createServer(app);
 
-    // configure Socket.IO
     const io = new IOServer(httpServer, {
       cors: {
         origin: process.env.CORS_ORIGIN || "*",
         methods: ["GET", "POST"],
         credentials: true,
       },
-      // transports: ["websocket", "polling"], // adjust if needed
     });
 
-    // initialize your socket handling (this should set io in a module-level helper)
-    try {
-      initSocket(io);
-      console.log("Socket.IO initialized");
-    } catch (e) {
-      console.error("initSocket failed:", e && e.stack ? e.stack : e);
-    }
+    // 🔐 JWT AUTH FOR SOCKETS
+    io.use((socket, next) => {
+      try {
+        const token =
+          socket.handshake?.auth?.token || socket.handshake?.query?.token;
+        if (!token) return next(new Error("auth error"));
 
-    // start listening and handle listen errors gracefully
-    httpServer.on("error", (err) => {
-      if (err && err.code === "EADDRINUSE") {
-        console.error(
-          `Port ${PORT} is already in use. Kill the process using it or change PORT.`
-        );
-      } else {
-        console.error("HTTP server error:", err && err.stack ? err.stack : err);
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+        const userId = payload?.id || payload?.userId || payload?._id;
+        if (!userId) return next(new Error("auth error"));
+
+        socket.user = { id: String(userId), ...payload };
+        next();
+      } catch (err) {
+        next(new Error("auth error"));
       }
-      process.exit(1);
     });
+
+    // ✅ SINGLE SOCKET INITIALIZATION
+    initSocket(io);
+    setIo(io);
 
     httpServer.listen(PORT, () => {
       console.log(
         `🚀 Server (HTTP + Socket.IO) started on http://localhost:${PORT}`
       );
     });
-
-    // graceful shutdown helpers
-    const shutdown = (signal) => {
-      console.log(`Received ${signal}. Shutting down server...`);
-      httpServer.close((err) => {
-        if (err) {
-          console.error("Error closing HTTP server:", err);
-          process.exit(1);
-        }
-        // close DB connection if your connectDB exposes it, otherwise rely on process exit
-        console.log("HTTP server closed. Exiting process.");
-        process.exit(0);
-      });
-      // force exit after timeout
-      setTimeout(() => {
-        console.warn("Forcing exit after 10s");
-        process.exit(1);
-      }, 10_000).unref();
-    };
-
-    process.on("SIGINT", () => shutdown("SIGINT"));
-    process.on("SIGTERM", () => shutdown("SIGTERM"));
   })
   .catch((err) => {
-    console.error("Failed to connect DB", err && err.stack ? err.stack : err);
+    console.error("Failed to connect DB", err);
     process.exit(1);
   });
