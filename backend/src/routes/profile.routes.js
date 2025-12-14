@@ -1,4 +1,3 @@
-// backend/src/routes/profile.routes.js
 import express from "express";
 import auth from "../middleware/auth.js";
 import uploadAvatar, {
@@ -15,18 +14,14 @@ import {
 
 const router = express.Router();
 
-/* Update profile (text + avatar upload) */
+/* Authenticated */
 router.patch("/update", auth, uploadAvatar, uploadToCloudinary, updateProfile);
-
-/* Change password */
 router.patch("/change-password", auth, changePassword);
 
-/* Get public profile (identifier = username or userId) */
-router.get("/:userId", getPublicProfile);
-
-/* Additional public endpoints */
+/* Public (ORDER MATTERS) */
 router.get("/:userId/stats", getPublicProfileStats);
 router.get("/:userId/reviews", getPublicProfileReviews);
 router.get("/:userId/shelves", getPublicProfileShelves);
+router.get("/:userId", getPublicProfile);
 
 export default router;

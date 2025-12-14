@@ -1,4 +1,3 @@
-// backend/src/controllers/profile.controller.js
 import mongoose from "mongoose";
 import User from "../models/User.js";
 import bcrypt from "bcrypt";
@@ -9,22 +8,17 @@ import ShelfItem from "../models/ShelfItem.js";
 import Follow from "../models/Follow.js";
 import Activity from "../models/Activity.js";
 
-/* ========== Update Profile (name, username, bio, avatarUrl) ========== */
+/* ========== Update Profile ========== */
 export async function updateProfile(req, res, next) {
   try {
     const userId = req.user.id;
     const { name, username, bio } = req.body;
 
     const updateData = {};
-
     if (name) updateData.name = name;
     if (username) updateData.username = username;
     if (bio !== undefined) updateData.bio = bio;
-
-    // avatar from Cloudinary? (middleware sets req.avatarUrl)
-    if (req.avatarUrl) {
-      updateData.avatarUrl = req.avatarUrl;
-    }
+    if (req.avatarUrl) updateData.avatarUrl = req.avatarUrl;
 
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
       new: true,
@@ -46,12 +40,10 @@ export async function changePassword(req, res, next) {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const match = await bcrypt.compare(oldPassword, user.passwordHash);
-    if (!match) {
+    if (!match)
       return res.status(400).json({ message: "Old password incorrect" });
-    }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-    user.passwordHash = passwordHash;
+    user.passwordHash = await bcrypt.hash(newPassword, 10);
     await user.save();
 
     res.json({ message: "Password updated successfully" });
@@ -60,28 +52,20 @@ export async function changePassword(req, res, next) {
   }
 }
 
-/* ============================
-   Helpers for public profile
-   ============================ */
+/* ========== Helpers ========== */
 function isObjectId(id) {
-  return new mongoose.isValidObjectId(id);
+  return mongoose.isValidObjectId(id);
 }
 
 async function resolveUserByIdentifier(identifier) {
   if (!identifier) return null;
   if (isObjectId(identifier)) {
     return User.findById(identifier).select("-passwordHash").lean();
-  } else {
-    return User.findOne({ username: identifier })
-      .select("-passwordHash")
-      .lean();
   }
+  return User.findOne({ username: identifier }).select("-passwordHash").lean();
 }
 
-/* ============================
-   GET /api/profile/:identifier
-   returns public user object + basic stats summary
-   ============================ */
+/* ========== Public Profile ========== */
 export async function getPublicProfile(req, res, next) {
   try {
     const identifier = req.params.userId;
@@ -106,64 +90,15 @@ export async function getPublicProfile(req, res, next) {
       Reading.countDocuments({ user: user._id, status: "to-read" }),
     ]);
 
-    // top authors from user's reviews
-    // top authors from user's reviews
-    const topAuthorsAgg = await Review.aggregate([
-      { $match: { user: new mongoose.Types.ObjectId(user._id) } },
-      {
-        $lookup: {
-          from: "books",
-          localField: "book",
-          foreignField: "_id",
-          as: "bookDoc",
-        },
-      },
-      { $unwind: { path: "$bookDoc", preserveNullAndEmptyArrays: true } },
-      {
-        $unwind: { path: "$bookDoc.authors", preserveNullAndEmptyArrays: true },
-      },
-      {
-        $group: {
-          _id: "$bookDoc.authors",
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-      { $limit: 5 },
-    ]);
-
-    const topAuthors = topAuthorsAgg
-      .filter((a) => a._id)
-      .map((a) => ({ author: a._id, count: a.count }));
-
-    // recent books from Reading (most recent updates)
-    const recentReadings = await Reading.find({ user: user._id })
+    const recentBooks = await Reading.find({ user: user._id })
       .sort({ updatedAt: -1 })
       .limit(8)
-      .populate({
-        path: "book",
-        select: "title authors cover externalId",
-      })
+      .populate("book", "title authors cover externalId")
       .lean();
 
-    const recentBooks = recentReadings
-      .filter((r) => r.book)
-      .map((r) => ({
-        bookId: r.book._id,
-        externalId: r.book.externalId,
-        title: r.book.title,
-        authors: r.book.authors,
-        cover: r.book.cover,
-        status: r.status,
-        progress: r.progress,
-        updatedAt: r.updatedAt,
-      }));
-
-    // recent activity
-    const recentActivity = await Activity.find({ user: user._id })
+    const recentActivity = await Activity.find({ actor: user._id })
       .sort({ createdAt: -1 })
       .limit(10)
-      .populate("actor", "name username avatarUrl")
       .lean();
 
     res.json({
@@ -176,7 +111,6 @@ export async function getPublicProfile(req, res, next) {
         booksFinished,
         booksReading,
         booksToRead,
-        topAuthors,
       },
       recentBooks,
       recentActivity,
@@ -186,42 +120,25 @@ export async function getPublicProfile(req, res, next) {
   }
 }
 
-/* ============================
-   GET /api/profile/:identifier/stats
-   ============================ */
+/* ========== Stats Only ========== */
 export async function getPublicProfileStats(req, res, next) {
   try {
-    const identifier = req.params.userId;
-    const user = await resolveUserByIdentifier(identifier);
+    const user = await resolveUserByIdentifier(req.params.userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const [
-      reviewsCount,
-      followersCount,
-      followingCount,
-      shelvesCount,
-      booksFinished,
-      booksReading,
-      booksToRead,
-    ] = await Promise.all([
+    const stats = await Promise.all([
       Review.countDocuments({ user: user._id }),
       Follow.countDocuments({ following: user._id }),
       Follow.countDocuments({ follower: user._id }),
       Shelf.countDocuments({ user: user._id }),
-      Reading.countDocuments({ user: user._id, status: "finished" }),
-      Reading.countDocuments({ user: user._id, status: "reading" }),
-      Reading.countDocuments({ user: user._id, status: "to-read" }),
     ]);
 
     res.json({
       stats: {
-        reviewsCount,
-        followersCount,
-        followingCount,
-        shelvesCount,
-        booksFinished,
-        booksReading,
-        booksToRead,
+        reviewsCount: stats[0],
+        followersCount: stats[1],
+        followingCount: stats[2],
+        shelvesCount: stats[3],
       },
     });
   } catch (err) {
@@ -248,7 +165,8 @@ export async function getPublicProfileReviews(req, res, next) {
         .skip(skip)
         .limit(limit)
         .populate("book", "title authors cover externalId")
-        .populate("user", "name username avatarUrl"),
+        .populate("user", "name username avatarUrl")
+        .lean(),
       Review.countDocuments({ user: user._id }),
     ]);
 
@@ -270,6 +188,7 @@ export async function getPublicProfileShelves(req, res, next) {
     const shelves = await Shelf.find({ user: user._id })
       .sort({ createdAt: -1 })
       .lean();
+
     const shelfIds = shelves.map((s) => s._id);
 
     const items = await ShelfItem.aggregate([
@@ -286,6 +205,7 @@ export async function getPublicProfileShelves(req, res, next) {
       {
         $group: {
           _id: "$shelf",
+          count: { $sum: 1 },
           sample: {
             $push: {
               bookId: "$bookDoc._id",
@@ -294,33 +214,29 @@ export async function getPublicProfileShelves(req, res, next) {
               externalId: "$bookDoc.externalId",
             },
           },
-          count: { $sum: 1 },
         },
       },
     ]);
 
-    const itemsMap = {};
-    items.forEach((it) => {
-      itemsMap[String(it._id)] = {
-        sample: (it.sample || []).slice(0, 6),
-        count: it.count,
+    const map = {};
+    items.forEach((i) => {
+      map[String(i._id)] = {
+        count: i.count,
+        sample: i.sample.slice(0, 6),
       };
     });
 
-    const enrichedShelves = shelves.map((s) => {
-      const im = itemsMap[String(s._id)] || { sample: [], count: 0 };
-      return {
-        _id: s._id,
-        name: s.name,
-        description: s.description,
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt,
-        count: im.count,
-        sample: im.sample,
-      };
-    });
+    const result = shelves.map((s) => ({
+      _id: s._id,
+      name: s.name,
+      description: s.description,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+      count: map[String(s._id)]?.count || 0,
+      sample: map[String(s._id)]?.sample || [],
+    }));
 
-    res.json({ shelves: enrichedShelves });
+    res.json({ shelves: result });
   } catch (err) {
     next(err);
   }
