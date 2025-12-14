@@ -9,10 +9,14 @@ import {
 
 const router = express.Router();
 
+// GET /api/notifications
 router.get("/", auth, getMyNotifications);
 
-router.patch("/:id/seen", auth, markAsSeen);
+// 🔴 IMPORTANT: static route FIRST
+// PATCH /api/notifications/mark-all-seen
+router.patch("/mark-all-seen", auth, markAllAsSeen);
 
-router.patch("/mark-all/seen", auth, markAllAsSeen);
+// PATCH /api/notifications/:id/seen
+router.patch("/:id/seen", auth, markAsSeen);
 
 export default router;

@@ -11,26 +11,25 @@ const socket = io(SERVER, {
 
 socket.on("connect", () => {
   console.log("connected", socket.id);
-  // request unread count as a quick sanity check
+
   socket.emit("get:unreadCount", (err, res) => {
     if (err) console.error("unread count error", err);
     else console.log("unread count:", res);
   });
 });
 
-socket.on("disconnect", (reason) => {
-  console.log("disconnected", reason);
-});
-
 socket.on("notification", (data) => {
   console.log("notification:", data);
 });
 
-socket.on("feed:update", (data) => {
-  console.log("feed:update:", data);
+socket.on("notification:unreadCount", (data) => {
+  console.log("notification:unreadCount", data);
 });
 
-// keep process alive
+socket.on("disconnect", (reason) => {
+  console.log("disconnected", reason);
+});
+
 process.on("SIGINT", () => {
   console.log("closing test client");
   socket.close();
