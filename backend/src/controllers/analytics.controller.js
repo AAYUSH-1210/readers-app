@@ -62,3 +62,77 @@ export async function getMonthlyReadingStats(req, res, next) {
     next(err);
   }
 }
+
+export async function getReadingStreaks(req, res, next) {
+  try {
+    const userId = req.user.id;
+
+    const readings = await Reading.find({ user: userId })
+      .select("updatedAt")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    if (!readings.length) {
+      return res.json({
+        currentStreak: 0,
+        longestStreak: 0,
+        lastReadDate: null,
+        isActiveToday: false,
+      });
+    }
+
+    // Normalize dates to YYYY-MM-DD
+    const uniqueDays = [
+      ...new Set(
+        readings.map((r) => new Date(r.updatedAt).toISOString().slice(0, 10))
+      ),
+    ]
+      .sort()
+      .reverse();
+
+    let currentStreak = 0;
+    let longestStreak = 0;
+
+    let prevDate = null;
+    let tempStreak = 0;
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    for (const day of uniqueDays) {
+      if (!prevDate) {
+        tempStreak = 1;
+      } else {
+        const diff =
+          (new Date(prevDate) - new Date(day)) / (1000 * 60 * 60 * 24);
+
+        if (diff === 1) {
+          tempStreak += 1;
+        } else {
+          tempStreak = 1;
+        }
+      }
+
+      longestStreak = Math.max(longestStreak, tempStreak);
+
+      if (!currentStreak) {
+        const diffFromToday =
+          (new Date(today) - new Date(day)) / (1000 * 60 * 60 * 24);
+
+        if (diffFromToday === 0 || diffFromToday === 1) {
+          currentStreak = tempStreak;
+        }
+      }
+
+      prevDate = day;
+    }
+
+    res.json({
+      currentStreak,
+      longestStreak,
+      lastReadDate: uniqueDays[0],
+      isActiveToday: uniqueDays[0] === today,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
