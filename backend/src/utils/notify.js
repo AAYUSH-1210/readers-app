@@ -1,6 +1,7 @@
 // backend/src/utils/notify.js
 import mongoose from "mongoose";
 import Notification from "../models/Notification.js";
+import { emitToUser } from "./socketService.js";
 
 /**
  * createNotification({
@@ -13,7 +14,7 @@ import Notification from "../models/Notification.js";
  * })
  *
  * Returns the created Notification document OR null if not created.
- * On internal error the function logs and returns null.
+ * Emits a realtime "notification" socket event to the recipient (best-effort).
  */
 export async function createNotification({
   user,
@@ -24,9 +25,7 @@ export async function createNotification({
   message = null,
 }) {
   try {
-    // Basic validation: require recipient, actor, type
     if (!user || !fromUser || !type) {
-      // insufficient information — do not create
       console.warn("createNotification: missing user/fromUser/type");
       return null;
     }
@@ -34,14 +33,14 @@ export async function createNotification({
     // Avoid notifying the actor about their own action
     if (String(user) === String(fromUser)) return null;
 
-    // Ensure message exists (Notification.message is required)
+    // Ensure message exists
     if (!message) {
       message = `${String(fromUser)} performed ${type}`;
     }
 
     const payload = {
       user,
-      fromUser, // your Notification model expects `fromUser`
+      fromUser,
       type,
       targetType: targetType || "none",
       message,
@@ -49,11 +48,8 @@ export async function createNotification({
 
     // Include targetId only if it is a valid ObjectId
     if (targetId && mongoose.isValidObjectId(String(targetId))) {
-      // Use 'new' to construct ObjectId to avoid TypeError in some Node/mongoose builds
       payload.targetId = new mongoose.Types.ObjectId(String(targetId));
     } else if (targetId) {
-      // If targetId provided but not a valid ObjectId, skip setting targetId
-      // and keep the reference only in the message (to avoid schema validation errors)
       payload.message = `${message} (ref:${String(targetId)})`;
     }
 
@@ -62,6 +58,31 @@ export async function createNotification({
       "createNotification: created",
       doc._id?.toString?.() || "(no id)"
     );
+
+    // Best-effort: emit realtime notification to recipient
+    try {
+      // Build client-friendly payload
+      const emitPayload = {
+        id: doc._id,
+        type: doc.type,
+        fromUser: String(fromUser),
+        targetType: doc.targetType,
+        targetId: doc.targetId || null,
+        message: doc.message,
+        createdAt: doc.createdAt,
+      };
+      const emitted = emitToUser(String(user), "notification", emitPayload);
+      if (!emitted) {
+        // optional: log that the user had no sockets connected right now
+        // console.debug("createNotification: emitToUser returned false (user offline?)", user);
+      }
+    } catch (emitErr) {
+      console.error(
+        "createNotification: realtime emit failed",
+        emitErr && emitErr.message ? emitErr.message : emitErr
+      );
+    }
+
     return doc;
   } catch (err) {
     console.error(
