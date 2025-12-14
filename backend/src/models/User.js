@@ -20,6 +20,9 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+userSchema.index({ username: 1 });
+userSchema.index({ name: 1 });
+
 // Optional: helper to format returned user object
 userSchema.methods.toClient = function () {
   const u = this.toObject();

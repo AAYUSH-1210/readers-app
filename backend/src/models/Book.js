@@ -20,5 +20,8 @@ const BookSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+BookSchema.index({ title: 1 });
+BookSchema.index({ authors: 1 });
+
 const Book = mongoose.models.Book || mongoose.model("Book", BookSchema);
 export default Book;
