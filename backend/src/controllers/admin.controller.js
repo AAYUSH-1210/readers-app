@@ -1,5 +1,7 @@
 import User from "../models/User.js";
 import Review from "../models/Review.js";
+import Reading from "../models/Reading.js";
+import Book from "../models/Book.js";
 
 /* ================= USERS ================= */
 
@@ -102,6 +104,97 @@ export async function restoreReview(req, res, next) {
     if (!review) return res.status(404).json({ message: "Review not found" });
 
     res.json({ review });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getAdminOverview(req, res, next) {
+  try {
+    const last30Days = new Date();
+    last30Days.setDate(last30Days.getDate() - 30);
+
+    const [
+      totalUsers,
+      activeUsers,
+      bannedUsers,
+      totalBooks,
+      totalReviews,
+      totalReadings,
+    ] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ updatedAt: { $gte: last30Days } }),
+      User.countDocuments({ isBanned: true }),
+      Book.countDocuments(),
+      Review.countDocuments({ isDeleted: false }),
+      Reading.countDocuments(),
+    ]);
+
+    res.json({
+      totalUsers,
+      activeUsers,
+      bannedUsers,
+      totalBooks,
+      totalReviews,
+      totalReadings,
+      generatedAt: new Date(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getAdminGrowth(req, res, next) {
+  try {
+    const days = Math.min(
+      90,
+      Math.max(7, parseInt(req.query.days || "30", 10))
+    );
+
+    const from = new Date();
+    from.setDate(from.getDate() - days);
+
+    const [users, reviews, readings] = await Promise.all([
+      User.aggregate([
+        { $match: { createdAt: { $gte: from } } },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Review.aggregate([
+        { $match: { createdAt: { $gte: from }, isDeleted: false } },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Reading.aggregate([
+        { $match: { createdAt: { $gte: from } } },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    res.json({
+      users,
+      reviews,
+      readings,
+    });
   } catch (err) {
     next(err);
   }

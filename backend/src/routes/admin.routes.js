@@ -7,6 +7,8 @@ import {
   listReviews,
   softDeleteReview,
   restoreReview,
+  getAdminOverview,
+  getAdminGrowth,
 } from "../controllers/admin.controller.js";
 
 const router = express.Router();
@@ -21,5 +23,9 @@ router.patch("/users/:userId/ban", banUser);
 router.get("/reviews", listReviews);
 router.patch("/reviews/:reviewId/delete", softDeleteReview);
 router.patch("/reviews/:reviewId/restore", restoreReview);
+
+/* DASHBOARD */
+router.get("/overview", getAdminOverview);
+router.get("/growth", getAdminGrowth);
 
 export default router;
