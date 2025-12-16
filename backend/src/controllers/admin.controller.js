@@ -1,10 +1,31 @@
+// backend/src/controllers/admin.controller.js
+// Admin controller.
+//
+// Responsibilities:
+// - Admin-only user management (list, ban/unban)
+// - Review moderation (soft delete / restore)
+// - Administrative analytics & growth metrics
+//
+// Assumptions:
+// - Access control is enforced by adminOnly middleware at the routing layer
+// - ObjectId validation is handled upstream or by global error middleware
+// - These endpoints are intended for admin dashboards and internal tools
+
 import User from "../models/User.js";
 import Review from "../models/Review.js";
 import Reading from "../models/Reading.js";
 import Book from "../models/Book.js";
 
-/* ================= USERS ================= */
+/* ======================================================
+   USERS
+====================================================== */
 
+/**
+ * GET /api/admin/users
+ *
+ * Returns paginated list of users.
+ * Password hashes are explicitly excluded.
+ */
 export async function listUsers(req, res, next) {
   try {
     const page = Math.max(1, parseInt(req.query.page || "1", 10));
@@ -26,6 +47,13 @@ export async function listUsers(req, res, next) {
   }
 }
 
+/**
+ * PATCH /api/admin/users/:userId/ban
+ *
+ * Ban or unban a user.
+ * - banned: true  -> ban user
+ * - banned: false -> unban user
+ */
 export async function banUser(req, res, next) {
   try {
     const { userId } = req.params;
@@ -37,7 +65,9 @@ export async function banUser(req, res, next) {
       { new: true }
     ).select("username isBanned");
 
-    if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     res.json({ user });
   } catch (err) {
@@ -45,8 +75,18 @@ export async function banUser(req, res, next) {
   }
 }
 
-/* ================= REVIEWS ================= */
+/* ======================================================
+   REVIEWS (MODERATION)
+====================================================== */
 
+/**
+ * GET /api/admin/reviews
+ *
+ * Query params:
+ * - deleted=true|false (optional)
+ *
+ * Returns paginated list of reviews for moderation.
+ */
 export async function listReviews(req, res, next) {
   try {
     const page = Math.max(1, parseInt(req.query.page || "1", 10));
@@ -73,6 +113,11 @@ export async function listReviews(req, res, next) {
   }
 }
 
+/**
+ * PATCH /api/admin/reviews/:reviewId/delete
+ *
+ * Soft-deletes a review.
+ */
 export async function softDeleteReview(req, res, next) {
   try {
     const { reviewId } = req.params;
@@ -83,7 +128,9 @@ export async function softDeleteReview(req, res, next) {
       { new: true }
     );
 
-    if (!review) return res.status(404).json({ message: "Review not found" });
+    if (!review) {
+      return res.status(404).json({ message: "Review not found" });
+    }
 
     res.json({ review });
   } catch (err) {
@@ -91,6 +138,11 @@ export async function softDeleteReview(req, res, next) {
   }
 }
 
+/**
+ * PATCH /api/admin/reviews/:reviewId/restore
+ *
+ * Restores a previously soft-deleted review.
+ */
 export async function restoreReview(req, res, next) {
   try {
     const { reviewId } = req.params;
@@ -101,7 +153,9 @@ export async function restoreReview(req, res, next) {
       { new: true }
     );
 
-    if (!review) return res.status(404).json({ message: "Review not found" });
+    if (!review) {
+      return res.status(404).json({ message: "Review not found" });
+    }
 
     res.json({ review });
   } catch (err) {
@@ -109,6 +163,19 @@ export async function restoreReview(req, res, next) {
   }
 }
 
+/* ======================================================
+   ADMIN ANALYTICS
+====================================================== */
+
+/**
+ * GET /api/admin/overview
+ *
+ * Returns high-level system metrics.
+ *
+ * Notes:
+ * - "activeUsers" is defined as users updated in the last 30 days
+ * - updatedAt may change due to profile edits, reading updates, follows, etc.
+ */
 export async function getAdminOverview(req, res, next) {
   try {
     const last30Days = new Date();
@@ -144,6 +211,20 @@ export async function getAdminOverview(req, res, next) {
   }
 }
 
+/**
+ * GET /api/admin/growth
+ *
+ * Query params:
+ * - days (7–90, default 30)
+ *
+ * Returns per-day growth metrics.
+ *
+ * Output shape:
+ * [{ _id: "YYYY-MM-DD", count }]
+ *
+ * Note:
+ * - Dates are sparse; frontend should fill missing days if needed.
+ */
 export async function getAdminGrowth(req, res, next) {
   try {
     const days = Math.min(
@@ -160,18 +241,29 @@ export async function getAdminGrowth(req, res, next) {
         {
           $group: {
             _id: {
-              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$createdAt",
+              },
             },
             count: { $sum: 1 },
           },
         },
       ]),
       Review.aggregate([
-        { $match: { createdAt: { $gte: from }, isDeleted: false } },
+        {
+          $match: {
+            createdAt: { $gte: from },
+            isDeleted: false,
+          },
+        },
         {
           $group: {
             _id: {
-              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$createdAt",
+              },
             },
             count: { $sum: 1 },
           },
@@ -182,7 +274,10 @@ export async function getAdminGrowth(req, res, next) {
         {
           $group: {
             _id: {
-              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$createdAt",
+              },
             },
             count: { $sum: 1 },
           },
@@ -190,11 +285,7 @@ export async function getAdminGrowth(req, res, next) {
       ]),
     ]);
 
-    res.json({
-      users,
-      reviews,
-      readings,
-    });
+    res.json({ users, reviews, readings });
   } catch (err) {
     next(err);
   }
