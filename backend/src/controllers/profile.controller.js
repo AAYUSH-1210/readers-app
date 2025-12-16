@@ -1,3 +1,16 @@
+// backend/src/controllers/profile.controller.js
+// Profile controller.
+//
+// Responsibilities:
+// - Handle private profile updates (name, username, bio, avatar, password)
+// - Expose public profile data by username or userId
+// - Aggregate profile statistics, shelves, reviews, and recent activity
+//
+// Assumptions:
+// - Username uniqueness is enforced at the schema or validation layer
+// - Password strength validation is handled by route validators or frontend
+// - Authentication middleware populates req.user.id
+
 import mongoose from "mongoose";
 import User from "../models/User.js";
 import bcrypt from "bcrypt";
@@ -8,7 +21,14 @@ import ShelfItem from "../models/ShelfItem.js";
 import Follow from "../models/Follow.js";
 import Activity from "../models/Activity.js";
 
-/* ========== Update Profile ========== */
+/* ======================================================
+   PRIVATE PROFILE ACTIONS
+====================================================== */
+
+/**
+ * Update authenticated user's profile.
+ * Supports name, username, bio, and avatar updates.
+ */
 export async function updateProfile(req, res, next) {
   try {
     const userId = req.user.id;
@@ -18,6 +38,8 @@ export async function updateProfile(req, res, next) {
     if (name) updateData.name = name;
     if (username) updateData.username = username;
     if (bio !== undefined) updateData.bio = bio;
+
+    // Avatar upload handled by middleware (uploadAvatar)
     if (req.avatarUrl) updateData.avatarUrl = req.avatarUrl;
 
     const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
@@ -30,7 +52,13 @@ export async function updateProfile(req, res, next) {
   }
 }
 
-/* ========== Change Password ========== */
+/**
+ * Change authenticated user's password.
+ *
+ * Validation notes:
+ * - Old password verification is enforced here
+ * - Password strength validation is assumed upstream
+ */
 export async function changePassword(req, res, next) {
   try {
     const userId = req.user.id;
@@ -40,38 +68,64 @@ export async function changePassword(req, res, next) {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const match = await bcrypt.compare(oldPassword, user.passwordHash);
-    if (!match)
+
+    if (!match) {
       return res.status(400).json({ message: "Old password incorrect" });
+    }
 
     user.passwordHash = await bcrypt.hash(newPassword, 10);
     await user.save();
 
-    res.json({ message: "Password updated successfully" });
+    res.json({
+      message: "Password updated successfully",
+    });
   } catch (err) {
     next(err);
   }
 }
 
-/* ========== Helpers ========== */
+/* ======================================================
+   HELPER UTILITIES
+====================================================== */
+
+/**
+ * Safe ObjectId check.
+ */
 function isObjectId(id) {
   return mongoose.isValidObjectId(id);
 }
 
+/**
+ * Resolve a user by ObjectId or username.
+ * - Password hash is always excluded
+ * - Lean documents are returned for read-only use
+ */
 async function resolveUserByIdentifier(identifier) {
   if (!identifier) return null;
+
   if (isObjectId(identifier)) {
     return User.findById(identifier).select("-passwordHash").lean();
   }
+
   return User.findOne({ username: identifier }).select("-passwordHash").lean();
 }
 
-/* ========== Public Profile ========== */
+/* ======================================================
+   PUBLIC PROFILE ENDPOINTS
+====================================================== */
+
+/**
+ * GET public profile overview.
+ * Includes stats, recent books, and recent activity.
+ */
 export async function getPublicProfile(req, res, next) {
   try {
     const identifier = req.params.userId;
     const user = await resolveUserByIdentifier(identifier);
+
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    // Aggregate profile statistics in parallel
     const [
       reviewsCount,
       followersCount,
@@ -85,18 +139,33 @@ export async function getPublicProfile(req, res, next) {
       Follow.countDocuments({ following: user._id }),
       Follow.countDocuments({ follower: user._id }),
       Shelf.countDocuments({ user: user._id }),
-      Reading.countDocuments({ user: user._id, status: "finished" }),
-      Reading.countDocuments({ user: user._id, status: "reading" }),
-      Reading.countDocuments({ user: user._id, status: "to-read" }),
+      Reading.countDocuments({
+        user: user._id,
+        status: "finished",
+      }),
+      Reading.countDocuments({
+        user: user._id,
+        status: "reading",
+      }),
+      Reading.countDocuments({
+        user: user._id,
+        status: "to-read",
+      }),
     ]);
 
-    const recentBooks = await Reading.find({ user: user._id })
+    // Recently interacted books (small fixed window)
+    const recentBooks = await Reading.find({
+      user: user._id,
+    })
       .sort({ updatedAt: -1 })
       .limit(8)
       .populate("book", "title authors cover externalId")
       .lean();
 
-    const recentActivity = await Activity.find({ actor: user._id })
+    // Recent public activity (reviews, shelves, etc.)
+    const recentActivity = await Activity.find({
+      actor: user._id,
+    })
       .sort({ createdAt: -1 })
       .limit(10)
       .lean();
@@ -120,10 +189,14 @@ export async function getPublicProfile(req, res, next) {
   }
 }
 
-/* ========== Stats Only ========== */
+/**
+ * GET public profile statistics only.
+ * Lightweight variant for quick profile cards.
+ */
 export async function getPublicProfileStats(req, res, next) {
   try {
     const user = await resolveUserByIdentifier(req.params.userId);
+
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const stats = await Promise.all([
@@ -146,9 +219,13 @@ export async function getPublicProfileStats(req, res, next) {
   }
 }
 
-/* ============================
-   GET /api/profile/:identifier/reviews
-   ============================ */
+/* ======================================================
+   PUBLIC PROFILE — REVIEWS
+====================================================== */
+
+/**
+ * GET paginated public reviews for a profile.
+ */
 export async function getPublicProfileReviews(req, res, next) {
   try {
     const identifier = req.params.userId;
@@ -157,6 +234,7 @@ export async function getPublicProfileReviews(req, res, next) {
     const skip = (page - 1) * limit;
 
     const user = await resolveUserByIdentifier(identifier);
+
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const [reviews, total] = await Promise.all([
@@ -176,21 +254,29 @@ export async function getPublicProfileReviews(req, res, next) {
   }
 }
 
-/* ============================
-   GET /api/profile/:identifier/shelves
-   ============================ */
+/* ======================================================
+   PUBLIC PROFILE — SHELVES
+====================================================== */
+
+/**
+ * GET public shelves with item counts and preview books.
+ */
 export async function getPublicProfileShelves(req, res, next) {
   try {
     const identifier = req.params.userId;
     const user = await resolveUserByIdentifier(identifier);
+
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const shelves = await Shelf.find({ user: user._id })
+    const shelves = await Shelf.find({
+      user: user._id,
+    })
       .sort({ createdAt: -1 })
       .lean();
 
     const shelfIds = shelves.map((s) => s._id);
 
+    // Aggregate shelf item counts and preview books
     const items = await ShelfItem.aggregate([
       { $match: { shelf: { $in: shelfIds } } },
       {
@@ -201,7 +287,12 @@ export async function getPublicProfileShelves(req, res, next) {
           as: "bookDoc",
         },
       },
-      { $unwind: { path: "$bookDoc", preserveNullAndEmptyArrays: true } },
+      {
+        $unwind: {
+          path: "$bookDoc",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
       {
         $group: {
           _id: "$shelf",
