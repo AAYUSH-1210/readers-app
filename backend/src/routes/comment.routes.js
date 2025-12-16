@@ -1,4 +1,23 @@
 // backend/src/routes/comment.routes.js
+//
+// Comment Routes
+//
+// Responsibilities:
+// - Add comments to books, reviews, or notes
+// - Fetch comments for a target (with replies)
+// - Update or delete user-owned comments
+//
+// Supported targetType values:
+// - book
+// - review
+// - note
+//
+// Notes:
+// - Creating, updating, deleting requires authentication
+// - Reading comments is public
+// - Validation is enforced at route level
+//
+
 import express from "express";
 import auth from "../middleware/auth.js";
 import {
@@ -11,21 +30,43 @@ import { body, param, validationResult, query } from "express-validator";
 
 const router = express.Router();
 
+/* ======================================================
+   Validation helper
+====================================================== */
 function validate(rules) {
   return async (req, res, next) => {
-    for (const r of rules) await r.run(req);
+    for (const r of rules) {
+      await r.run(req);
+    }
     const errors = validationResult(req);
-    if (!errors.isEmpty())
-      return res
-        .status(400)
-        .json({
-          errors: errors.array().map((e) => ({ field: e.param, msg: e.msg })),
-        });
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        errors: errors.array().map((e) => ({
+          field: e.param,
+          msg: e.msg,
+        })),
+      });
+    }
     next();
   };
 }
 
-/* Add comment */
+/* ======================================================
+   POST /api/comments/add
+====================================================== */
+/**
+ * Add a comment to a target.
+ *
+ * Body:
+ * - targetType: book | review | note (required)
+ * - targetId: string (required)
+ * - text: string (required)
+ * - parent: MongoId (optional, for replies)
+ * - externalId: string (optional, for books)
+ *
+ * Access:
+ * - Authenticated users only
+ */
 router.post(
   "/add",
   auth,
@@ -39,7 +80,23 @@ router.post(
   addComment
 );
 
-/* Get comments for a target (paginated) */
+/* ======================================================
+   GET /api/comments/:targetType/:targetId
+====================================================== */
+/**
+ * Get comments for a target (paginated).
+ *
+ * Params:
+ * - targetType: book | review | note
+ * - targetId
+ *
+ * Query:
+ * - page (default: 1)
+ * - limit (default: 20)
+ *
+ * Access:
+ * - Public
+ */
 router.get(
   "/:targetType/:targetId",
   validate([
@@ -51,7 +108,18 @@ router.get(
   getCommentsByTarget
 );
 
-/* Update */
+/* ======================================================
+   PATCH /api/comments/:id
+====================================================== */
+/**
+ * Update an existing comment.
+ *
+ * Body:
+ * - text (optional)
+ *
+ * Access:
+ * - Owner only
+ */
 router.patch(
   "/:id",
   auth,
@@ -59,7 +127,15 @@ router.patch(
   updateComment
 );
 
-/* Delete */
+/* ======================================================
+   DELETE /api/comments/:id
+====================================================== */
+/**
+ * Soft-delete a comment.
+ *
+ * Access:
+ * - Owner only
+ */
 router.delete("/:id", auth, validate([param("id").isMongoId()]), deleteComment);
 
 export default router;
