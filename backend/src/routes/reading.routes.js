@@ -1,28 +1,50 @@
 // backend/src/routes/reading.routes.js
+//
+// Reading Routes
+//
+// Responsibilities:
+// - Manage a user's reading lifecycle for books
+// - Add or update reading status (to-read | reading | finished)
+// - Fetch reading lists (all or by status)
+// - Remove reading entries
+//
+// Notes:
+// - All routes are authenticated
+// - One reading entry per user per book
+// - Book records are lazily created if missing
+//
+// Base path:
+// - /api/reading
+//
+
 import express from "express";
 import auth from "../middleware/auth.js";
 import {
-  addToReading,
-  getReadingList,
-  updateReading,
+  addOrUpdateReading,
+  getMyReading,
+  getMyReadingByStatus,
   removeReading,
-  checkBookInList,
 } from "../controllers/reading.controller.js";
 import { body, param, query, validationResult } from "express-validator";
 
 const router = express.Router();
 
-/* ------------------ helper middleware ------------------ */
+/* ======================================================
+   Validation Helper
+====================================================== */
 function validate(rules) {
   return async (req, res, next) => {
-    for (let rule of rules) {
+    for (const rule of rules) {
       await rule.run(req);
     }
 
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({
-        errors: errors.array().map((e) => ({ field: e.path, msg: e.msg })),
+        errors: errors.array().map((e) => ({
+          field: e.path,
+          msg: e.msg,
+        })),
       });
     }
 
@@ -30,7 +52,17 @@ function validate(rules) {
   };
 }
 
-/* ------------------ POST /add ------------------ */
+/* ======================================================
+   POST /api/reading/add
+====================================================== */
+/**
+ * Add or update reading entry for a book.
+ *
+ * Body:
+ * - externalId (required)
+ * - status (required): to-read | reading | finished
+ * - title, authors, cover (optional)
+ */
 router.post(
   "/add",
   auth,
@@ -38,70 +70,59 @@ router.post(
     body("externalId")
       .notEmpty()
       .withMessage("externalId is required")
-      .isString()
-      .withMessage("externalId must be a string"),
-
-    body("title").notEmpty().withMessage("title is required"),
-
-    body("authors")
-      .optional()
-      .isArray()
-      .withMessage("authors must be an array of strings"),
-
-    body("cover")
-      .optional()
-      .isString()
-      .withMessage("cover must be a string URL"),
-
-    body("source").optional().isString().withMessage("source must be a string"),
-  ]),
-  addToReading
-);
-
-/* ------------------ GET /list ------------------ */
-router.get("/list", auth, getReadingList);
-
-/* ------------------ PATCH /:id ------------------ */
-router.patch(
-  "/:id",
-  auth,
-  validate([
-    param("id").isMongoId().withMessage("Invalid reading entry ID"),
-
-    body("progress")
-      .optional()
-      .isInt({ min: 0, max: 100 })
-      .withMessage("progress must be between 0 and 100"),
+      .isString(),
 
     body("status")
-      .optional()
+      .notEmpty()
       .isIn(["to-read", "reading", "finished"])
-      .withMessage("Invalid status value"),
+      .withMessage("Invalid reading status"),
 
-    body("notes").optional().isString().withMessage("notes must be a string"),
+    body("title").optional().isString(),
+    body("authors").optional().isArray(),
+    body("cover").optional().isString(),
   ]),
-  updateReading
+  addOrUpdateReading
 );
 
-/* ------------------ DELETE /:id ------------------ */
+/* ======================================================
+   GET /api/reading/me
+====================================================== */
+/**
+ * Get all reading entries for the current user.
+ */
+router.get("/me", auth, getMyReading);
+
+/* ======================================================
+   GET /api/reading/status/:status
+====================================================== */
+/**
+ * Get reading entries by status.
+ *
+ * Params:
+ * - status: to-read | reading | finished
+ */
+router.get(
+  "/status/:status",
+  auth,
+  validate([
+    param("status")
+      .isIn(["to-read", "reading", "finished"])
+      .withMessage("Invalid reading status"),
+  ]),
+  getMyReadingByStatus
+);
+
+/* ======================================================
+   DELETE /api/reading/:id
+====================================================== */
+/**
+ * Remove a reading entry.
+ */
 router.delete(
   "/:id",
   auth,
-  validate([param("id").isMongoId().withMessage("Invalid reading entry ID")]),
+  validate([param("id").isMongoId().withMessage("Invalid reading entry id")]),
   removeReading
-);
-
-/* ------------------ GET /check ------------------ */
-// /api/reading/check?externalId=/works/OL82563W
-router.get(
-  "/check",
-  auth,
-  validate([
-    query("externalId")
-      .notEmpty()
-      .withMessage("externalId is required in query"),
-  ]),
-  checkBookInList
 );
 
 export default router;
