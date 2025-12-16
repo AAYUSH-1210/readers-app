@@ -1,5 +1,18 @@
 // backend/src/services/recommender.service.js
-// ESM, uses your Review/Reading/Shelf models and returns items: { book, score, reason, createdAt }
+// Collaborative recommendation service.
+//
+// Strategy (MVP-friendly user-based CF):
+// 1) Collect a user's interaction history (reviews, readings, shelves)
+// 2) Find similar users based on overlapping reviewed books (recent window)
+// 3) Collect candidate books those users interacted with
+// 4) Score candidates using frequency + average rating
+// 5) Apply cold-start and fallback strategies when signals are weak
+//
+// Design principles:
+// - Favor recent interactions (bounded time window)
+// - Be resilient to missing or partial data
+// - Avoid breaking feed composition on failures
+// - Keep scoring simple and interpretable
 
 import mongoose from "mongoose";
 import Book from "../models/Book.js";
@@ -11,45 +24,63 @@ import ShelfItem from "../models/ShelfItem.js";
 const DEFAULT_LIMIT = 50;
 const RECENT_WINDOW_DAYS = 180;
 
+/**
+ * Utility: date N days ago
+ */
 function daysAgoDate(days) {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d;
 }
 
-/* -------------------------
+/* -------------------------------------------------
    USER INTERACTIONS
-------------------------- */
+------------------------------------------------- */
+/**
+ * Collects all book interaction signals for a user.
+ * Returns both raw interaction lists and a deduplicated
+ * list of interacted bookIds.
+ */
 async function getUserInteractions(userId) {
-  if (!userId)
+  if (!userId) {
     return {
       reviewed: [],
       readings: [],
       shelfItems: [],
       interactedBookIds: [],
     };
+  }
 
+  // Reviews are the strongest signal
   const reviewed = await Review.find({ user: userId })
     .select("book createdAt rating")
     .lean();
 
+  // Reading status is a softer signal; failures are non-fatal
   let readings = [];
   try {
     readings = await Reading.find({ user: userId })
       .select("book status updatedAt createdAt")
       .lean();
-  } catch {}
+  } catch {
+    // intentionally ignored (optional signal)
+  }
 
+  // Shelf membership is a weak but useful intent signal
   const shelves = await Shelf.find({ user: userId }).select("_id").lean();
+
   const shelfIds = shelves.map((s) => s._id);
 
   let shelfItems = [];
   if (shelfIds.length) {
-    shelfItems = await ShelfItem.find({ shelf: { $in: shelfIds } })
+    shelfItems = await ShelfItem.find({
+      shelf: { $in: shelfIds },
+    })
       .select("book createdAt")
       .lean();
   }
 
+  // Deduplicate interacted book ids
   const set = new Set();
   reviewed.forEach((r) => r.book && set.add(String(r.book)));
   readings.forEach((r) => r.book && set.add(String(r.book)));
@@ -63,9 +94,13 @@ async function getUserInteractions(userId) {
   };
 }
 
-/* -------------------------
+/* -------------------------------------------------
    SIMILAR USERS
-------------------------- */
+------------------------------------------------- */
+/**
+ * Finds users who reviewed the same books as the seed user
+ * within a recent time window.
+ */
 async function getSimilarUsers(seedBookIds, excludeUserId, limit = 200) {
   if (!seedBookIds.length) return [];
 
@@ -90,9 +125,13 @@ async function getSimilarUsers(seedBookIds, excludeUserId, limit = 200) {
     .filter((id) => id !== String(excludeUserId));
 }
 
-/* -------------------------
+/* -------------------------------------------------
    CANDIDATE COLLECTION
-------------------------- */
+------------------------------------------------- */
+/**
+ * Collects candidate books from similar users' recent reviews.
+ * Aggregates frequency, average rating, and recency.
+ */
 async function collectCandidateBooks(similarUserIds, excludeBookIds) {
   if (!similarUserIds.length) return [];
 
@@ -132,23 +171,36 @@ async function collectCandidateBooks(similarUserIds, excludeBookIds) {
   }));
 }
 
+/**
+ * Simple candidate scoring:
+ * - Frequency dominates
+ * - Rating provides secondary boost
+ */
 function scoreCandidate(c) {
   const freq = Math.min(1, c.count / 10);
   const rating = Math.min(1, (c.avgRating || 0) / 5);
   return 0.7 * freq + 0.3 * rating;
 }
 
-/* -------------------------
+/* -------------------------------------------------
    MAIN API
-------------------------- */
+------------------------------------------------- */
+/**
+ * Returns personalized book recommendations for a user.
+ *
+ * @param {string|ObjectId} userId
+ * @param {number} limit
+ * @returns {Array<{book, score, reason, createdAt}>}
+ */
 async function getPersonalizedPicks(userId, limit = DEFAULT_LIMIT) {
   if (!userId) return [];
 
   const { interactedBookIds } = await getUserInteractions(userId);
 
-  /* 🧊 Cold start */
+  /* 🧊 Cold start: no interaction history */
   if (!interactedBookIds.length) {
     const books = await Book.find({})
+      .select("title authors avgRating createdAt updatedAt cover")
       .sort({ avgRating: -1 })
       .limit(limit)
       .lean();
@@ -166,8 +218,11 @@ async function getPersonalizedPicks(userId, limit = DEFAULT_LIMIT) {
     userId
   );
 
+  /* Fallback: user has history but no similar users */
   if (!similarUsers.length) {
-    const fallback = await Book.find({ _id: { $nin: interactedBookIds } })
+    const fallback = await Book.find({
+      _id: { $nin: interactedBookIds },
+    })
       .limit(limit)
       .lean();
 
@@ -207,5 +262,8 @@ async function getPersonalizedPicks(userId, limit = DEFAULT_LIMIT) {
     .slice(0, limit);
 }
 
+// Dual export is intentional:
+// - default import for services
+// - named import for tests / utilities
 export default { getPersonalizedPicks };
 export { getPersonalizedPicks };
