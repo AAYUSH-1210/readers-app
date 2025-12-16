@@ -1,13 +1,34 @@
+// backend/src/middleware/uploadAvatar.js
+// Middleware for handling avatar uploads.
+// Uses in-memory storage and streams directly to Cloudinary
+// to avoid temporary disk writes.
+
 import multer from "multer";
 import cloudinary from "../config/cloudinary.js";
 import streamifier from "streamifier";
 
-// Use memory storage because we upload directly to Cloudinary
-const upload = multer({ storage: multer.memoryStorage() });
+// Configure multer to use memory storage with a safe file size limit
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB max avatar size
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept only image files
+    if (!file.mimetype || !file.mimetype.startsWith("image/")) {
+      return cb(new Error("Only image files are allowed"), false);
+    }
+    cb(null, true);
+  },
+});
 
-// This wrapper uploads file buffer to Cloudinary
+/**
+ * Uploads avatar image to Cloudinary and attaches the URL to req.avatarUrl.
+ * Must be used after multer middleware.
+ */
 export function uploadAvatar(req, res, next) {
-  if (!req.file) return next(); // No file uploaded
+  // No file uploaded — proceed without modifying request
+  if (!req.file) return next();
 
   const stream = cloudinary.uploader.upload_stream(
     {
@@ -20,14 +41,15 @@ export function uploadAvatar(req, res, next) {
         return res.status(500).json({ message: "Upload failed" });
       }
 
-      // Save Cloudinary URL to request
+      // Attach Cloudinary URL for downstream handlers
       req.avatarUrl = result.secure_url;
-      next();
+      return next();
     }
   );
 
-  // Convert buffer to stream
+  // Convert in-memory buffer to readable stream and pipe to Cloudinary
   streamifier.createReadStream(req.file.buffer).pipe(stream);
 }
 
+// Export multer middleware for single avatar upload
 export default upload.single("avatar");
