@@ -1,45 +1,65 @@
+// backend/src/controllers/bookclubDiscussion.controller.js
+//
+// Book Club Discussion controller
+//
+// Responsibilities:
+// - Create discussions inside book clubs
+// - Enforce membership & privacy rules
+// - Support pagination & soft deletes
+
 import mongoose from "mongoose";
 import BookClub from "../models/BookClub.js";
 import BookClubMember from "../models/BookClubMember.js";
 import BookClubDiscussion from "../models/BookClubDiscussion.js";
 
-/* ===============================
+/* ======================================================
    Helpers
-================================ */
+====================================================== */
 
-async function ensureMember(userId, clubId) {
+/**
+ * Check whether a user is a member of a club.
+ */
+async function isMember(userId, clubId) {
+  if (!userId || !mongoose.isValidObjectId(clubId)) return false;
+
   const member = await BookClubMember.findOne({
     club: clubId,
     user: userId,
-  });
-  return !!member;
+  }).select("_id");
+
+  return Boolean(member);
 }
 
-/* ===============================
+/* ======================================================
    CREATE DISCUSSION
    POST /api/bookclubs/:clubId/discussions
-================================ */
-
+====================================================== */
 export async function createDiscussion(req, res, next) {
   try {
     const userId = req.user.id;
     const { clubId } = req.params;
     const { title, body, book, chapter } = req.body;
 
-    if (!title || !body) {
-      return res.status(400).json({ message: "Title and body are required" });
+    if (!mongoose.isValidObjectId(clubId)) {
+      return res.status(400).json({ message: "Invalid club id" });
     }
 
-    const club = await BookClub.findById(clubId);
+    if (!title || !body) {
+      return res.status(400).json({
+        message: "Title and body are required",
+      });
+    }
+
+    const club = await BookClub.findById(clubId).select("isPublic");
     if (!club) {
       return res.status(404).json({ message: "Book club not found" });
     }
 
-    const isMember = await ensureMember(userId, clubId);
-    if (!isMember) {
-      return res
-        .status(403)
-        .json({ message: "Join the club to post discussions" });
+    const member = await isMember(userId, clubId);
+    if (!member) {
+      return res.status(403).json({
+        message: "Join the club to post discussions",
+      });
     }
 
     const discussion = await BookClubDiscussion.create({
@@ -57,25 +77,28 @@ export async function createDiscussion(req, res, next) {
   }
 }
 
-/* ===============================
+/* ======================================================
    LIST DISCUSSIONS
    GET /api/bookclubs/:clubId/discussions
-================================ */
-
+====================================================== */
 export async function listDiscussions(req, res, next) {
   try {
-    const userId = req.user?.id;
+    const userId = req.user?.id || null;
     const { clubId } = req.params;
 
-    const club = await BookClub.findById(clubId);
+    if (!mongoose.isValidObjectId(clubId)) {
+      return res.status(400).json({ message: "Invalid club id" });
+    }
+
+    const club = await BookClub.findById(clubId).select("isPublic");
     if (!club) {
       return res.status(404).json({ message: "Book club not found" });
     }
 
-    // Private club → must be member
+    // Private club → membership required
     if (!club.isPublic) {
-      const isMember = userId && (await ensureMember(userId, clubId));
-      if (!isMember) {
+      const member = await isMember(userId, clubId);
+      if (!member) {
         return res.status(403).json({ message: "Club is private" });
       }
     }
@@ -93,7 +116,10 @@ export async function listDiscussions(req, res, next) {
         .limit(limit)
         .lean(),
 
-      BookClubDiscussion.countDocuments({ club: clubId, isDeleted: false }),
+      BookClubDiscussion.countDocuments({
+        club: clubId,
+        isDeleted: false,
+      }),
     ]);
 
     res.json({ page, limit, total, items });
@@ -102,14 +128,18 @@ export async function listDiscussions(req, res, next) {
   }
 }
 
-/* ===============================
+/* ======================================================
    GET SINGLE DISCUSSION
    GET /api/discussions/:id
-================================ */
-
+====================================================== */
 export async function getDiscussion(req, res, next) {
   try {
+    const userId = req.user?.id || null;
     const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: "Invalid discussion id" });
+    }
 
     const discussion = await BookClubDiscussion.findById(id)
       .populate("author", "username avatarUrl")
@@ -118,6 +148,19 @@ export async function getDiscussion(req, res, next) {
 
     if (!discussion || discussion.isDeleted) {
       return res.status(404).json({ message: "Discussion not found" });
+    }
+
+    // Enforce club privacy
+    const club = await BookClub.findById(discussion.club).select("isPublic");
+    if (!club) {
+      return res.status(404).json({ message: "Book club not found" });
+    }
+
+    if (!club.isPublic) {
+      const member = await isMember(userId, discussion.club);
+      if (!member) {
+        return res.status(403).json({ message: "Club is private" });
+      }
     }
 
     res.json({ discussion });
