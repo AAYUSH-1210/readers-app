@@ -1,124 +1,220 @@
 // backend/src/controllers/reading.controller.js
-import Book from "../models/Book.js";
-import Reading from "../models/Reading.js";
+//
+// Reading controller.
+//
+// Responsibilities:
+// - Manage a user's reading lifecycle for a book
+// - Ensure referenced Book exists (lazy creation)
+// - Prevent duplicate reading entries per user+book
+// - Support status transitions: to-read | reading | finished
+//
+// Notes:
+// - Reading entries are strictly user-owned
+// - One reading entry per user per book
+// - Analytics & feed consume this data downstream
 
-/* ---------- helper ---------- */
-async function findOrCreateBook(payload) {
-  const { externalId, title, authors, cover, source, raw } = payload;
-  let book = await Book.findOne({ externalId });
+import mongoose from "mongoose";
+import Reading from "../models/Reading.js";
+import Book from "../models/Book.js";
+
+/* ======================================================
+   Helpers
+====================================================== */
+
+/**
+ * Normalize OpenLibrary externalId formats.
+ */
+function normalizeExternalId(externalId) {
+  if (!externalId) return null;
+  externalId = externalId.trim();
+
+  if (externalId.startsWith("/")) return externalId;
+  if (/^OL.*W$/.test(externalId)) return `/works/${externalId}`;
+  if (/^OL.*M$/.test(externalId)) return `/books/${externalId}`;
+  if (externalId.startsWith("works/") || externalId.startsWith("books/")) {
+    return `/${externalId}`;
+  }
+  return externalId;
+}
+
+/**
+ * Ensure a Book exists.
+ */
+async function findOrCreateBook({
+  externalId,
+  title,
+  authors = [],
+  cover = null,
+}) {
+  const normalized = normalizeExternalId(externalId);
+
+  let book = await Book.findOne({ externalId: normalized });
   if (!book) {
     book = await Book.create({
-      externalId,
-      title,
+      externalId: normalized,
+      title: title || "",
       authors,
       cover,
-      source,
-      raw,
+      source: "openlibrary",
     });
   }
+
   return book;
 }
 
-/* ---------- add to reading list ---------- */
-export async function addToReading(req, res, next) {
+/* ======================================================
+   POST /api/reading/add
+====================================================== */
+/**
+ * Add or update reading status for a book.
+ *
+ * body:
+ * - externalId (required)
+ * - status: to-read | reading | finished (required)
+ * - title, authors, cover (optional)
+ */
+export async function addOrUpdateReading(req, res, next) {
   try {
     const userId = req.user.id;
-    const { externalId, title, authors, cover, source } = req.body;
-    if (!externalId || !title)
-      return res.status(400).json({ message: "externalId and title required" });
+    const { externalId, status, title, authors, cover } = req.body;
+
+    if (!externalId || !status) {
+      return res.status(400).json({
+        message: "externalId and status are required",
+      });
+    }
+
+    if (!["to-read", "reading", "finished"].includes(status)) {
+      return res.status(400).json({
+        message: "Invalid reading status",
+      });
+    }
 
     const book = await findOrCreateBook({
       externalId,
       title,
       authors,
       cover,
-      source,
-      raw: req.body.raw || {},
     });
 
-    // prevent duplicates
-    const existing = await Reading.findOne({ user: userId, book: book._id });
-    if (existing) return res.status(200).json({ reading: existing });
-
-    const reading = await Reading.create({
+    let reading = await Reading.findOne({
       user: userId,
       book: book._id,
-      status: "to-read",
-      progress: 0,
     });
-    await reading.populate("book");
-    res.status(201).json({ reading });
-  } catch (err) {
-    next(err);
-  }
-}
 
-/* ---------- get reading list ---------- */
-export async function getReadingList(req, res, next) {
-  try {
-    const userId = req.user.id;
-    const list = await Reading.find({ user: userId })
-      .populate("book")
-      .sort({ updatedAt: -1 });
-    res.json({ list });
-  } catch (err) {
-    next(err);
-  }
-}
+    if (!reading) {
+      reading = await Reading.create({
+        user: userId,
+        book: book._id,
+        externalId: book.externalId,
+        status,
+        startedAt: status === "reading" ? new Date() : null,
+        finishedAt: status === "finished" ? new Date() : null,
+      });
+    } else {
+      // Handle status transitions
+      if (status === "reading" && reading.status !== "reading") {
+        reading.startedAt = new Date();
+      }
+      if (status === "finished" && reading.status !== "finished") {
+        reading.finishedAt = new Date();
+      }
 
-/* ---------- update reading entry ---------- */
-export async function updateReading(req, res, next) {
-  try {
-    const userId = req.user.id;
-    const { id } = req.params;
-    const { progress, status, notes } = req.body;
-
-    const reading = await Reading.findOne({ _id: id, user: userId });
-    if (!reading) return res.status(404).json({ message: "Not found" });
-
-    if (progress !== undefined) {
-      reading.progress = Math.max(0, Math.min(100, progress));
+      reading.status = status;
+      await reading.save();
     }
-    if (status) reading.status = status;
-    if (notes !== undefined) reading.notes = notes;
-    if (reading.progress === 100 || status === "finished") {
-      reading.status = "finished";
-      reading.finishedAt = reading.finishedAt || new Date();
-    }
-    await reading.save();
+
     await reading.populate("book");
+
     res.json({ reading });
   } catch (err) {
     next(err);
   }
 }
 
-/* ---------- remove reading entry ---------- */
-export async function removeReading(req, res, next) {
+/* ======================================================
+   GET /api/reading/me
+====================================================== */
+/**
+ * Get all reading entries for current user.
+ */
+export async function getMyReading(req, res, next) {
   try {
     const userId = req.user.id;
-    const { id } = req.params;
-    const reading = await Reading.findOneAndDelete({ _id: id, user: userId });
-    if (!reading) return res.status(404).json({ message: "Not found" });
-    res.json({ message: "removed" });
+
+    const items = await Reading.find({ user: userId })
+      .sort({ updatedAt: -1 })
+      .populate("book");
+
+    res.json({ items });
   } catch (err) {
     next(err);
   }
 }
 
-/* ---------- check if book (externalId) exists in user's list ---------- */
-export async function checkBookInList(req, res, next) {
+/* ======================================================
+   GET /api/reading/status/:status
+====================================================== */
+/**
+ * Get reading entries by status.
+ */
+export async function getMyReadingByStatus(req, res, next) {
   try {
     const userId = req.user.id;
-    const { externalId } = req.query;
-    if (!externalId)
-      return res.status(400).json({ message: "externalId required" });
+    const { status } = req.params;
 
-    const book = await Book.findOne({ externalId });
-    if (!book) return res.json({ inList: false });
+    if (!["to-read", "reading", "finished"].includes(status)) {
+      return res.status(400).json({
+        message: "Invalid reading status",
+      });
+    }
 
-    const reading = await Reading.findOne({ user: userId, book: book._id });
-    return res.json({ inList: Boolean(reading), reading });
+    const items = await Reading.find({
+      user: userId,
+      status,
+    })
+      .sort({ updatedAt: -1 })
+      .populate("book");
+
+    res.json({ items });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/* ======================================================
+   DELETE /api/reading/:id
+====================================================== */
+/**
+ * Remove a reading entry.
+ */
+export async function removeReading(req, res, next) {
+  try {
+    const userId = req.user.id;
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        message: "Invalid reading id",
+      });
+    }
+
+    const reading = await Reading.findById(id);
+    if (!reading) {
+      return res.status(404).json({
+        message: "Reading entry not found",
+      });
+    }
+
+    if (String(reading.user) !== String(userId)) {
+      return res.status(403).json({
+        message: "Not allowed",
+      });
+    }
+
+    await Reading.findByIdAndDelete(id);
+
+    res.json({ message: "deleted" });
   } catch (err) {
     next(err);
   }
