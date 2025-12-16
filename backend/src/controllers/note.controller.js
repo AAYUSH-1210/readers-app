@@ -1,23 +1,55 @@
 // backend/src/controllers/note.controller.js
+//
+// Note controller.
+//
+// Responsibilities:
+// - Create personal notes linked to books
+// - Ensure referenced books exist (lazy creation via OpenLibrary ids)
+// - Fetch notes per book or per user
+// - Allow users to update and delete their own notes
+//
+// Design notes:
+// - Notes are strictly user-owned
+// - Notes always reference a Book document (created if missing)
+// - externalId normalization is consistent with other controllers
+// - No social side-effects (likes/comments handled elsewhere)
+
 import Note from "../models/Note.js";
 import Book from "../models/Book.js";
 
-/* Normalize externalId */
+/* ======================================================
+   Helpers
+====================================================== */
+
+/**
+ * Normalize OpenLibrary externalId formats.
+ *
+ * Accepts:
+ * - "/works/OL82563W"
+ * - "OL82563W"
+ * - "works/OL82563W"
+ * - "/books/OL123M"
+ */
 function normalizeExternalId(externalId) {
   if (!externalId) return null;
+
   externalId = externalId.trim();
 
   if (externalId.startsWith("/")) return externalId;
   if (/^OL.*W$/.test(externalId)) return `/works/${externalId}`;
   if (/^OL.*M$/.test(externalId)) return `/books/${externalId}`;
 
-  if (externalId.startsWith("works/") || externalId.startsWith("books/"))
+  if (externalId.startsWith("works/") || externalId.startsWith("books/")) {
     return `/${externalId}`;
+  }
 
   return externalId;
 }
 
-/* Ensure Book exists */
+/**
+ * Ensure a Book document exists for the given payload.
+ * Creates a minimal Book if not present.
+ */
 async function findOrCreateBook({
   externalId,
   title,
@@ -27,6 +59,7 @@ async function findOrCreateBook({
   const normalized = normalizeExternalId(externalId);
 
   let book = await Book.findOne({ externalId: normalized });
+
   if (!book) {
     book = await Book.create({
       externalId: normalized,
@@ -40,8 +73,20 @@ async function findOrCreateBook({
   return book;
 }
 
-/* ============================= ADD NOTE ============================= */
-
+/* ======================================================
+   POST /api/notes/add
+====================================================== */
+/**
+ * Add a personal note for a book.
+ *
+ * body:
+ * - externalId (required)
+ * - content (required)
+ * - title (optional)
+ * - highlight (optional)
+ * - pageNumber (optional)
+ * - authors, cover (optional, for book creation)
+ */
 export async function addNote(req, res, next) {
   try {
     const userId = req.user.id;
@@ -55,12 +100,18 @@ export async function addNote(req, res, next) {
       cover,
     } = req.body;
 
-    if (!externalId || !content)
-      return res
-        .status(400)
-        .json({ message: "externalId and content are required" });
+    if (!externalId || !content) {
+      return res.status(400).json({
+        message: "externalId and content are required",
+      });
+    }
 
-    const book = await findOrCreateBook({ externalId, title, authors, cover });
+    const book = await findOrCreateBook({
+      externalId,
+      title,
+      authors,
+      cover,
+    });
 
     const note = await Note.create({
       user: userId,
@@ -80,21 +131,34 @@ export async function addNote(req, res, next) {
   }
 }
 
-/* ============================= GET NOTES FOR BOOK ============================= */
-
+/* ======================================================
+   GET /api/notes/book/:externalId
+====================================================== */
+/**
+ * Get notes for the current user for a specific book.
+ */
 export async function getNotesForBook(req, res, next) {
   try {
     const userId = req.user.id;
     const rawId = req.params.externalId;
 
-    if (!rawId) return res.status(400).json({ message: "externalId required" });
+    if (!rawId) {
+      return res.status(400).json({
+        message: "externalId required",
+      });
+    }
 
     const normalized = normalizeExternalId(rawId);
     const book = await Book.findOne({ externalId: normalized });
 
-    if (!book) return res.json({ notes: [] });
+    if (!book) {
+      return res.json({ notes: [] });
+    }
 
-    const notes = await Note.find({ user: userId, book: book._id })
+    const notes = await Note.find({
+      user: userId,
+      book: book._id,
+    })
       .sort({ createdAt: -1 })
       .populate("book");
 
@@ -104,8 +168,12 @@ export async function getNotesForBook(req, res, next) {
   }
 }
 
-/* ============================= GET NOTES FOR USER ============================= */
-
+/* ======================================================
+   GET /api/notes/me
+====================================================== */
+/**
+ * Get all notes created by the current user.
+ */
 export async function getNotesForUser(req, res, next) {
   try {
     const userId = req.user.id;
@@ -120,8 +188,12 @@ export async function getNotesForUser(req, res, next) {
   }
 }
 
-/* ============================= UPDATE NOTE ============================= */
-
+/* ======================================================
+   PATCH /api/notes/:noteId
+====================================================== */
+/**
+ * Update a note owned by the current user.
+ */
 export async function updateNote(req, res, next) {
   try {
     const userId = req.user.id;
@@ -129,10 +201,18 @@ export async function updateNote(req, res, next) {
     const { title, content, highlight, pageNumber } = req.body;
 
     const note = await Note.findById(noteId);
-    if (!note) return res.status(404).json({ message: "Note not found" });
 
-    if (String(note.user) !== String(userId))
-      return res.status(403).json({ message: "Not allowed" });
+    if (!note) {
+      return res.status(404).json({
+        message: "Note not found",
+      });
+    }
+
+    if (String(note.user) !== String(userId)) {
+      return res.status(403).json({
+        message: "Not allowed",
+      });
+    }
 
     if (title !== undefined) note.title = title;
     if (content !== undefined) note.content = content;
@@ -148,18 +228,30 @@ export async function updateNote(req, res, next) {
   }
 }
 
-/* ============================= DELETE NOTE ============================= */
-
+/* ======================================================
+   DELETE /api/notes/:noteId
+====================================================== */
+/**
+ * Delete a note owned by the current user.
+ */
 export async function deleteNote(req, res, next) {
   try {
     const userId = req.user.id;
     const noteId = req.params.noteId;
 
     const note = await Note.findById(noteId);
-    if (!note) return res.status(404).json({ message: "Note not found" });
 
-    if (String(note.user) !== String(userId))
-      return res.status(403).json({ message: "Not allowed" });
+    if (!note) {
+      return res.status(404).json({
+        message: "Note not found",
+      });
+    }
+
+    if (String(note.user) !== String(userId)) {
+      return res.status(403).json({
+        message: "Not allowed",
+      });
+    }
 
     await Note.findByIdAndDelete(noteId);
 
