@@ -1,15 +1,42 @@
 // backend/src/routes/auth.routes.js
+//
+// Authentication Routes
+//
+// Responsibilities:
+// - User signup (account creation)
+// - User login (JWT-based authentication)
+//
+// Security:
+// - Passwords are hashed using bcrypt
+// - JWT is signed using process.env.JWT_SECRET
+//
+// Notes:
+// - This file intentionally does NOT use controllers
+//   because auth logic is tightly coupled to validation & JWT
+// - Token payload: { userId }
+//
+// Route prefix:
+// - /api/auth
+//
+
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import User from "../models/User.js";
 import { body, validationResult } from "express-validator";
+import User from "../models/User.js";
 
 const router = express.Router();
 
+/* ======================================================
+   SIGNUP
+   POST /api/auth/signup
+====================================================== */
 /**
- * POST /api/auth/signup
- * body: { name, username, email, password }
+ * Body:
+ * - name (string, required)
+ * - username (string, required, unique)
+ * - email (string, required, unique)
+ * - password (string, required, min 6 chars)
  */
 router.post(
   "/signup",
@@ -37,29 +64,32 @@ router.post(
   ],
   async (req, res) => {
     try {
-      // validationResult
+      /* ---------- Validation ---------- */
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
         return res.status(400).json({
-          errors: errors.array().map((e) => ({ field: e.param, msg: e.msg })),
+          errors: errors.array().map((e) => ({
+            field: e.param,
+            msg: e.msg,
+          })),
         });
       }
 
       const { name, username, email, password } = req.body;
 
-      // check existing by email or username
+      /* ---------- Check existing user ---------- */
       const existing = await User.findOne({
         $or: [{ email: email.toLowerCase() }, { username }],
       });
+
       if (existing) {
-        return res
-          .status(400)
-          .json({ message: "User with that email or username already exists" });
+        return res.status(400).json({
+          message: "User with that email or username already exists",
+        });
       }
 
-      // hash password
-      const saltRounds = 10;
-      const passwordHash = await bcrypt.hash(password, saltRounds);
+      /* ---------- Hash password ---------- */
+      const passwordHash = await bcrypt.hash(password, 10);
 
       const user = await User.create({
         name,
@@ -68,17 +98,18 @@ router.post(
         passwordHash,
       });
 
-      // create token
+      /* ---------- JWT ---------- */
       const jwtSecret = process.env.JWT_SECRET;
       if (!jwtSecret) {
         console.error("JWT_SECRET not configured");
         return res.status(500).json({ message: "Server misconfigured" });
       }
+
       const token = jwt.sign({ userId: user._id }, jwtSecret, {
         expiresIn: "7d",
       });
 
-      res.status(201).json({
+      return res.status(201).json({
         token,
         user: user.toClient
           ? user.toClient()
@@ -90,15 +121,20 @@ router.post(
             },
       });
     } catch (err) {
-      console.error("signup error:", err);
+      console.error("[AUTH] signup error:", err);
       res.status(500).json({ message: "Server error" });
     }
   }
 );
 
+/* ======================================================
+   LOGIN
+   POST /api/auth/login
+====================================================== */
 /**
- * POST /api/auth/login
- * body: { emailOrUsername, password }
+ * Body:
+ * - emailOrUsername (string, required)
+ * - password (string, required)
  */
 router.post(
   "/login",
@@ -111,35 +147,41 @@ router.post(
   ],
   async (req, res) => {
     try {
-      // validationResult
+      /* ---------- Validation ---------- */
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
         return res.status(400).json({
-          errors: errors.array().map((e) => ({ field: e.param, msg: e.msg })),
+          errors: errors.array().map((e) => ({
+            field: e.param,
+            msg: e.msg,
+          })),
         });
       }
 
       const { emailOrUsername, password } = req.body;
 
-      // find by email (lowercased) or username
+      /* ---------- Resolve user ---------- */
       const queryEmail = emailOrUsername.includes("@")
         ? emailOrUsername.toLowerCase()
         : null;
 
       const user = await User.findOne({
         $or: [
-          { email: queryEmail || undefined },
+          queryEmail ? { email: queryEmail } : null,
           { username: emailOrUsername },
         ].filter(Boolean),
       });
 
-      if (!user)
+      if (!user) {
         return res.status(400).json({ message: "Invalid credentials" });
+      }
 
       const match = await bcrypt.compare(password, user.passwordHash);
-      if (!match)
+      if (!match) {
         return res.status(400).json({ message: "Invalid credentials" });
+      }
 
+      /* ---------- JWT ---------- */
       const jwtSecret = process.env.JWT_SECRET;
       if (!jwtSecret) {
         console.error("JWT_SECRET not configured");
@@ -150,7 +192,7 @@ router.post(
         expiresIn: "7d",
       });
 
-      res.json({
+      return res.json({
         token,
         user: user.toClient
           ? user.toClient()
@@ -162,7 +204,7 @@ router.post(
             },
       });
     } catch (err) {
-      console.error("login error:", err);
+      console.error("[AUTH] login error:", err);
       res.status(500).json({ message: "Server error" });
     }
   }
