@@ -1,9 +1,28 @@
 // backend/src/controllers/shelf.controller.js
+//
+// Shelf controller.
+//
+// Responsibilities:
+// - CRUD shelves (user-owned)
+// - Manage shelf items (books)
+// - Lazy-create books via externalId normalization
+//
+// Notes:
+// - Shelf names are unique per user
+// - Shelf items are unique per shelf+book
+// - All operations enforce ownership
+
 import Shelf from "../models/Shelf.js";
 import ShelfItem from "../models/ShelfItem.js";
 import Book from "../models/Book.js";
 
-/* Normalize externalId */
+/* ======================================================
+   Helpers
+====================================================== */
+
+/**
+ * Normalize OpenLibrary externalId formats.
+ */
 function normalizeExternalId(externalId) {
   if (!externalId) return null;
   externalId = externalId.trim();
@@ -11,35 +30,38 @@ function normalizeExternalId(externalId) {
   if (externalId.startsWith("/")) return externalId;
   if (/^OL.*W$/.test(externalId)) return `/works/${externalId}`;
   if (/^OL.*M$/.test(externalId)) return `/books/${externalId}`;
-
-  if (externalId.startsWith("works/") || externalId.startsWith("books/"))
+  if (externalId.startsWith("works/") || externalId.startsWith("books/")) {
     return `/${externalId}`;
-
+  }
   return externalId;
 }
 
-/* Ensure Book exists or create minimal */
-async function findOrCreateBook({
-  externalId,
-  title,
-  authors = [],
-  cover = null,
-}) {
+/**
+ * Ensure Book exists or create a minimal one.
+ */
+async function findOrCreateBook({ externalId, title, authors = [], cover }) {
   const normalized = normalizeExternalId(externalId);
+  if (!normalized) {
+    throw new Error("Invalid externalId");
+  }
+
   let book = await Book.findOne({ externalId: normalized });
   if (!book) {
     book = await Book.create({
       externalId: normalized,
       title: title || "",
-      authors: authors || [],
+      authors,
       cover: cover || null,
       source: "openlibrary",
     });
   }
+
   return book;
 }
 
-/* ============================= SHELF CRUD ============================= */
+/* ======================================================
+   SHELF CRUD
+====================================================== */
 
 /* POST /api/shelves/create */
 export async function createShelf(req, res, next) {
@@ -47,18 +69,23 @@ export async function createShelf(req, res, next) {
     const userId = req.user.id;
     const { name, description } = req.body;
 
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Shelf name is required" });
+    }
+
     const shelf = await Shelf.create({
       user: userId,
-      name,
+      name: name.trim(),
       description: description || "",
     });
 
     res.status(201).json({ shelf });
   } catch (err) {
-    if (err.code === 11000)
+    if (err.code === 11000) {
       return res
         .status(409)
         .json({ message: "Shelf name already exists for this user" });
+    }
     next(err);
   }
 }
@@ -67,7 +94,9 @@ export async function createShelf(req, res, next) {
 export async function listMyShelves(req, res, next) {
   try {
     const userId = req.user.id;
-    const shelves = await Shelf.find({ user: userId }).sort({ createdAt: -1 });
+    const shelves = await Shelf.find({ user: userId }).sort({
+      createdAt: -1,
+    });
     res.json({ shelves });
   } catch (err) {
     next(err);
@@ -77,14 +106,12 @@ export async function listMyShelves(req, res, next) {
 /* GET /api/shelves/:shelfId */
 export async function getShelf(req, res, next) {
   try {
-    const shelfId = req.params.shelfId;
-    const shelf = await Shelf.findById(shelfId);
-
+    const shelf = await Shelf.findById(req.params.shelfId);
     if (!shelf) return res.status(404).json({ message: "Shelf not found" });
 
-    // ensure ownership
-    if (String(shelf.user) !== String(req.user.id))
-      return res.status(403).json({ message: "Not your shelf" });
+    if (String(shelf.user) !== String(req.user.id)) {
+      return res.status(403).json({ message: "Not allowed" });
+    }
 
     res.json({ shelf });
   } catch (err) {
@@ -95,23 +122,30 @@ export async function getShelf(req, res, next) {
 /* PATCH /api/shelves/:shelfId */
 export async function updateShelf(req, res, next) {
   try {
-    const shelfId = req.params.shelfId;
-    const { name, description } = req.body;
-
-    const shelf = await Shelf.findById(shelfId);
+    const shelf = await Shelf.findById(req.params.shelfId);
     if (!shelf) return res.status(404).json({ message: "Shelf not found" });
 
-    if (String(shelf.user) !== String(req.user.id))
+    if (String(shelf.user) !== String(req.user.id)) {
       return res.status(403).json({ message: "Not allowed" });
+    }
 
-    if (name !== undefined) shelf.name = name;
+    const { name, description } = req.body;
+
+    if (name !== undefined) {
+      if (!name.trim()) {
+        return res.status(400).json({ message: "Shelf name cannot be empty" });
+      }
+      shelf.name = name.trim();
+    }
+
     if (description !== undefined) shelf.description = description;
 
     await shelf.save();
     res.json({ shelf });
   } catch (err) {
-    if (err.code === 11000)
+    if (err.code === 11000) {
       return res.status(409).json({ message: "Shelf name already exists" });
+    }
     next(err);
   }
 }
@@ -119,15 +153,15 @@ export async function updateShelf(req, res, next) {
 /* DELETE /api/shelves/:shelfId */
 export async function deleteShelf(req, res, next) {
   try {
-    const shelfId = req.params.shelfId;
-    const shelf = await Shelf.findById(shelfId);
+    const shelf = await Shelf.findById(req.params.shelfId);
+    if (!shelf) return res.status(404).json({ message: "Shelf not found" });
 
-    if (!shelf) return res.status(404).json({ message: "Not found" });
-    if (String(shelf.user) !== String(req.user.id))
+    if (String(shelf.user) !== String(req.user.id)) {
       return res.status(403).json({ message: "Not allowed" });
+    }
 
-    await ShelfItem.deleteMany({ shelf: shelfId });
-    await Shelf.findByIdAndDelete(shelfId);
+    await ShelfItem.deleteMany({ shelf: shelf._id });
+    await Shelf.findByIdAndDelete(shelf._id);
 
     res.json({ message: "Shelf deleted" });
   } catch (err) {
@@ -135,30 +169,34 @@ export async function deleteShelf(req, res, next) {
   }
 }
 
-/* ============================= SHELF ITEMS ============================= */
+/* ======================================================
+   SHELF ITEMS
+====================================================== */
 
 /* POST /api/shelves/:shelfId/add */
 export async function addBookToShelf(req, res, next) {
   try {
-    const shelfId = req.params.shelfId;
-    const { externalId, title, authors, cover, note } = req.body;
-
-    const shelf = await Shelf.findById(shelfId);
+    const shelf = await Shelf.findById(req.params.shelfId);
     if (!shelf) return res.status(404).json({ message: "Shelf not found" });
 
-    if (String(shelf.user) !== String(req.user.id))
+    if (String(shelf.user) !== String(req.user.id)) {
       return res.status(403).json({ message: "Not allowed" });
+    }
 
+    const { externalId, title, authors, cover, note } = req.body;
     const book = await findOrCreateBook({ externalId, title, authors, cover });
 
     const existing = await ShelfItem.findOne({
-      shelf: shelfId,
+      shelf: shelf._id,
       book: book._id,
     });
-    if (existing) return res.status(200).json({ item: existing });
+
+    if (existing) {
+      return res.status(200).json({ item: existing });
+    }
 
     const item = await ShelfItem.create({
-      shelf: shelfId,
+      shelf: shelf._id,
       book: book._id,
       externalId: book.externalId,
       note: note || "",
@@ -167,8 +205,6 @@ export async function addBookToShelf(req, res, next) {
     await item.populate("book");
     res.status(201).json({ item });
   } catch (err) {
-    if (err.code === 11000)
-      return res.status(200).json({ message: "Already exists" });
     next(err);
   }
 }
@@ -176,15 +212,14 @@ export async function addBookToShelf(req, res, next) {
 /* GET /api/shelves/:shelfId/items */
 export async function listShelfItems(req, res, next) {
   try {
-    const shelfId = req.params.shelfId;
-
-    const shelf = await Shelf.findById(shelfId);
+    const shelf = await Shelf.findById(req.params.shelfId);
     if (!shelf) return res.status(404).json({ message: "Shelf not found" });
 
-    if (String(shelf.user) !== String(req.user.id))
+    if (String(shelf.user) !== String(req.user.id)) {
       return res.status(403).json({ message: "Not allowed" });
+    }
 
-    const items = await ShelfItem.find({ shelf: shelfId })
+    const items = await ShelfItem.find({ shelf: shelf._id })
       .populate("book")
       .sort({ createdAt: -1 });
 
@@ -197,15 +232,14 @@ export async function listShelfItems(req, res, next) {
 /* DELETE /api/shelves/item/:itemId */
 export async function removeBookFromShelf(req, res, next) {
   try {
-    const itemId = req.params.itemId;
+    const item = await ShelfItem.findById(req.params.itemId).populate("shelf");
+    if (!item) return res.status(404).json({ message: "Item not found" });
 
-    const item = await ShelfItem.findById(itemId).populate("shelf");
-    if (!item) return res.status(404).json({ message: "Not found" });
-
-    if (String(item.shelf.user) !== String(req.user.id))
+    if (String(item.shelf.user) !== String(req.user.id)) {
       return res.status(403).json({ message: "Not allowed" });
+    }
 
-    await ShelfItem.findByIdAndDelete(itemId);
+    await ShelfItem.findByIdAndDelete(item._id);
     res.json({ message: "removed" });
   } catch (err) {
     next(err);
