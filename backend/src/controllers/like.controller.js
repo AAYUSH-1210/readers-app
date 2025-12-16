@@ -1,4 +1,19 @@
 // backend/src/controllers/like.controller.js
+// Like controller.
+//
+// Responsibilities:
+// - Toggle likes on supported target types
+// - Maintain denormalized likesCount on targets (best-effort)
+// - Emit activity events for feed
+// - Create notifications for content owners
+// - Emit realtime socket updates (best-effort)
+//
+// Design notes:
+// - Like toggling is implemented via create → duplicate-key → delete pattern
+// - All targets must be referenced by ObjectId (no externalId support here)
+// - likesCount is denormalized and may drift in rare failure cases
+// - Notifications and socket emits are best-effort and never block requests
+
 import mongoose from "mongoose";
 import Like from "../models/Like.js";
 import Book from "../models/Book.js";
@@ -11,54 +26,82 @@ import { logActivity } from "../utils/activityLogger.js";
 import { createNotification } from "../utils/notify.js";
 import { emitToUser } from "../utils/socketService.js";
 
-/* Helper: validate target exists (best-effort) */
+/**
+ * Best-effort target existence check.
+ *
+ * Notes:
+ * - Requires valid ObjectId
+ * - Does not support externalId
+ * - Used only as pre-validation for toggleLike
+ */
 async function targetExists(targetType, targetId) {
   if (!targetType || !targetId) return false;
   if (!mongoose.isValidObjectId(targetId)) return false;
 
-  if (targetType === "book")
+  if (targetType === "book") {
     return Boolean(await Book.exists({ _id: targetId }));
-  if (targetType === "review")
+  }
+  if (targetType === "review") {
     return Boolean(await Review.exists({ _id: targetId }));
-  if (targetType === "note")
+  }
+  if (targetType === "note") {
     return Boolean(await Note.exists({ _id: targetId }));
-  if (targetType === "comment")
+  }
+  if (targetType === "comment") {
     return Boolean(await Comment.exists({ _id: targetId }));
-  if (targetType === "shelfItem")
+  }
+  if (targetType === "shelfItem") {
     return Boolean(await ShelfItem.exists({ _id: targetId }));
+  }
+
   return false;
 }
 
+/* ======================================================
+   POST /api/likes/toggle
+====================================================== */
 /**
- * POST /api/likes/toggle
- * body: { targetType, targetId }
- * toggles like for current user; returns { liked: boolean, count: number, likeId? }
+ * Toggle like for the current user.
+ *
+ * body:
+ * - targetType: "book" | "review" | "note" | "comment" | "shelfItem"
+ * - targetId: ObjectId
+ *
+ * Returns:
+ * - { liked: boolean, count: number, likeId? }
  */
 export async function toggleLike(req, res, next) {
   try {
     const userId = req.user.id;
     let { targetType, targetId } = req.body;
 
-    if (!targetType || !targetId)
-      return res
-        .status(400)
-        .json({ message: "targetType and targetId required" });
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        message: "targetType and targetId required",
+      });
+    }
 
-    // ensure targetId is valid ObjectId
+    // Enforce ObjectId-only targets
     if (!mongoose.isValidObjectId(targetId)) {
-      return res
-        .status(400)
-        .json({ message: "targetId must be a valid ObjectId" });
+      return res.status(400).json({
+        message: "targetId must be a valid ObjectId",
+      });
     }
 
     const exists = await targetExists(targetType, targetId);
-    if (!exists) return res.status(404).json({ message: "Target not found" });
+    if (!exists) {
+      return res.status(404).json({ message: "Target not found" });
+    }
 
-    // Try create; on duplicate remove -> toggle behavior
+    // Try creating a like; duplicate key means toggle OFF
     try {
-      const like = await Like.create({ user: userId, targetType, targetId });
+      const like = await Like.create({
+        user: userId,
+        targetType,
+        targetId,
+      });
 
-      // increment likesCount on parent (best-effort)
+      // Best-effort increment of likesCount
       const modelMap = {
         book: Book,
         review: Review,
@@ -67,6 +110,7 @@ export async function toggleLike(req, res, next) {
         shelfItem: ShelfItem,
       };
       const TargetModel = modelMap[targetType];
+
       if (TargetModel) {
         try {
           await TargetModel.findByIdAndUpdate(targetId, {
@@ -77,7 +121,7 @@ export async function toggleLike(req, res, next) {
         }
       }
 
-      // activity log (use "like")
+      // Activity log
       logActivity({
         user: userId,
         type: "like",
@@ -86,10 +130,10 @@ export async function toggleLike(req, res, next) {
         book: targetType === "book" ? targetId : null,
       });
 
-      // create notification for recipient (best-effort)
+      // Best-effort notification to content owner
       try {
-        // resolve recipient by target type
         let recipientId = null;
+
         if (targetType === "review") {
           const rev = await Review.findById(targetId).select("user");
           recipientId = rev?.user;
@@ -103,20 +147,23 @@ export async function toggleLike(req, res, next) {
           const si = await ShelfItem.findById(targetId).select("user");
           recipientId = si?.user;
         } else if (targetType === "book") {
-          const b = await Book.findById(targetId).select("owner"); // optional owner field
+          // Optional owner field on Book (best-effort)
+          const b = await Book.findById(targetId).select("owner");
           recipientId = b?.owner;
         }
 
-        // only notify if recipient exists and is not the actor
+        // Notify only if recipient exists and is not the actor
         if (recipientId && String(recipientId) !== String(userId)) {
           const actor = await User.findById(userId).select(
             "name username avatarUrl"
           );
+
           const actorName =
             (actor && (actor.name || actor.username)) || "Someone";
+
           const message = `${actorName} liked your ${targetType}`;
 
-          const not = await createNotification({
+          const notification = await createNotification({
             user: recipientId,
             fromUser: userId,
             type: "like",
@@ -125,10 +172,10 @@ export async function toggleLike(req, res, next) {
             message,
           });
 
-          // emit realtime event (best-effort)
+          // Emit realtime notification payload (best-effort)
           try {
             emitToUser(recipientId, "notification", {
-              id: not?._id,
+              id: notification?._id,
               type: "like",
               actor: {
                 _id: actor?._id,
@@ -138,28 +185,35 @@ export async function toggleLike(req, res, next) {
               targetType,
               targetId,
               message,
-              createdAt: not?.createdAt,
+              createdAt: notification?.createdAt,
             });
           } catch (e) {
-            // don't fail the request if emit fails
             console.error("emitToUser failed", e);
           }
         }
-      } catch (errNotify) {
-        console.error("Failed to create/emit notification", errNotify);
+      } catch (notifyErr) {
+        console.error("Failed to create or emit like notification", notifyErr);
       }
 
-      const count = await Like.countDocuments({ targetType, targetId });
-      return res.status(201).json({ liked: true, count, likeId: like._id });
+      const count = await Like.countDocuments({
+        targetType,
+        targetId,
+      });
+
+      return res.status(201).json({
+        liked: true,
+        count,
+        likeId: like._id,
+      });
     } catch (err) {
-      // duplicate key -> toggle off
+      // Duplicate key → toggle OFF
       if (err.code === 11000) {
-        const removed = await Like.findOneAndDelete({
+        await Like.findOneAndDelete({
           user: userId,
           targetType,
           targetId,
         });
-        // decrement likesCount on parent (best-effort)
+
         const modelMap = {
           book: Book,
           review: Review,
@@ -168,6 +222,7 @@ export async function toggleLike(req, res, next) {
           shelfItem: ShelfItem,
         };
         const TargetModel = modelMap[targetType];
+
         if (TargetModel) {
           try {
             await TargetModel.findByIdAndUpdate(targetId, {
@@ -178,7 +233,6 @@ export async function toggleLike(req, res, next) {
           }
         }
 
-        // activity log
         logActivity({
           user: userId,
           type: "like",
@@ -186,27 +240,39 @@ export async function toggleLike(req, res, next) {
           meta: { targetType, targetId: String(targetId) },
         });
 
-        const count = await Like.countDocuments({ targetType, targetId });
+        const count = await Like.countDocuments({
+          targetType,
+          targetId,
+        });
+
         return res.json({ liked: false, count });
       }
 
-      // if other error, check existing and remove if present
+      // Defensive fallback
       const existing = await Like.findOne({
         user: userId,
         targetType,
         targetId,
       });
+
       if (existing) {
         await Like.findByIdAndDelete(existing._id);
-        const count = await Like.countDocuments({ targetType, targetId });
+
         logActivity({
           user: userId,
           type: "like",
           action: "removed",
           meta: { targetType, targetId: String(targetId) },
         });
+
+        const count = await Like.countDocuments({
+          targetType,
+          targetId,
+        });
+
         return res.json({ liked: false, count });
       }
+
       throw err;
     }
   } catch (err) {
@@ -214,42 +280,64 @@ export async function toggleLike(req, res, next) {
   }
 }
 
-/* GET /api/likes/count?targetType=&targetId= */
+/* ======================================================
+   GET /api/likes/count
+====================================================== */
+/**
+ * Get like count for a target.
+ */
 export async function getLikeCount(req, res, next) {
   try {
     const { targetType, targetId } = req.query;
-    if (!targetType || !targetId)
-      return res
-        .status(400)
-        .json({ message: "targetType and targetId required" });
-    if (!mongoose.isValidObjectId(targetId))
-      return res
-        .status(400)
-        .json({ message: "targetId must be valid ObjectId" });
 
-    const count = await Like.countDocuments({ targetType, targetId });
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        message: "targetType and targetId required",
+      });
+    }
+
+    if (!mongoose.isValidObjectId(targetId)) {
+      return res.status(400).json({
+        message: "targetId must be valid ObjectId",
+      });
+    }
+
+    const count = await Like.countDocuments({
+      targetType,
+      targetId,
+    });
+
     res.json({ targetType, targetId, count });
   } catch (err) {
     next(err);
   }
 }
 
-/* GET /api/likes/list?targetType=&targetId=&limit=&page= */
+/* ======================================================
+   GET /api/likes/list
+====================================================== */
+/**
+ * List likes for a target (paginated).
+ */
 export async function listLikes(req, res, next) {
   try {
     const { targetType, targetId } = req.query;
+
     const page = Math.max(1, parseInt(req.query.page || "1", 10));
     const limit = Math.min(100, parseInt(req.query.limit || "20", 10));
     const skip = (page - 1) * limit;
 
-    if (!targetType || !targetId)
-      return res
-        .status(400)
-        .json({ message: "targetType and targetId required" });
-    if (!mongoose.isValidObjectId(targetId))
-      return res
-        .status(400)
-        .json({ message: "targetId must be valid ObjectId" });
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        message: "targetType and targetId required",
+      });
+    }
+
+    if (!mongoose.isValidObjectId(targetId)) {
+      return res.status(400).json({
+        message: "targetId must be valid ObjectId",
+      });
+    }
 
     const [likes, total] = await Promise.all([
       Like.find({ targetType, targetId })
@@ -266,10 +354,16 @@ export async function listLikes(req, res, next) {
   }
 }
 
-/* GET /api/likes/me  -> list targets the user has liked (paginated) */
+/* ======================================================
+   GET /api/likes/me
+====================================================== */
+/**
+ * List targets liked by the current user (paginated).
+ */
 export async function listMyLikes(req, res, next) {
   try {
     const userId = req.user.id;
+
     const page = Math.max(1, parseInt(req.query.page || "1", 10));
     const limit = Math.min(100, parseInt(req.query.limit || "20", 10));
     const skip = (page - 1) * limit;
