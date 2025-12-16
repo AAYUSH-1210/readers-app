@@ -40,13 +40,11 @@ function normalizeExternalId(externalId) {
 /**
  * Ensure a Book exists.
  */
-async function findOrCreateBook({
-  externalId,
-  title,
-  authors = [],
-  cover = null,
-}) {
+async function findOrCreateBook({ externalId, title, authors = [], cover }) {
   const normalized = normalizeExternalId(externalId);
+  if (!normalized) {
+    throw new Error("Invalid externalId");
+  }
 
   let book = await Book.findOne({ externalId: normalized });
   if (!book) {
@@ -54,7 +52,7 @@ async function findOrCreateBook({
       externalId: normalized,
       title: title || "",
       authors,
-      cover,
+      cover: cover || null,
       source: "openlibrary",
     });
   }
@@ -102,6 +100,8 @@ export async function addOrUpdateReading(req, res, next) {
       book: book._id,
     });
 
+    let created = false;
+
     if (!reading) {
       reading = await Reading.create({
         user: userId,
@@ -111,22 +111,24 @@ export async function addOrUpdateReading(req, res, next) {
         startedAt: status === "reading" ? new Date() : null,
         finishedAt: status === "finished" ? new Date() : null,
       });
+      created = true;
     } else {
-      // Handle status transitions
-      if (status === "reading" && reading.status !== "reading") {
-        reading.startedAt = new Date();
+      // Handle status transitions only when status actually changes
+      if (status !== reading.status) {
+        if (status === "reading") {
+          reading.startedAt = new Date();
+        }
+        if (status === "finished") {
+          reading.finishedAt = new Date();
+        }
+        reading.status = status;
+        await reading.save();
       }
-      if (status === "finished" && reading.status !== "finished") {
-        reading.finishedAt = new Date();
-      }
-
-      reading.status = status;
-      await reading.save();
     }
 
     await reading.populate("book");
 
-    res.json({ reading });
+    return res.status(created ? 201 : 200).json({ reading });
   } catch (err) {
     next(err);
   }
@@ -169,10 +171,7 @@ export async function getMyReadingByStatus(req, res, next) {
       });
     }
 
-    const items = await Reading.find({
-      user: userId,
-      status,
-    })
+    const items = await Reading.find({ user: userId, status })
       .sort({ updatedAt: -1 })
       .populate("book");
 
