@@ -1,56 +1,97 @@
 // backend/src/controllers/book.controller.js
+// Book controller.
+//
+// Responsibilities:
+// - Normalize and resolve OpenLibrary identifiers
+// - Fetch book metadata from OpenLibrary (best-effort)
+// - Persist normalized books into MongoDB
+// - Serve books from the local database
+//
+// Notes:
+// - This is NOT a search endpoint (see search.controller.js)
+// - OpenLibrary is treated as an external, best-effort dependency
+// - externalId is the canonical deduplication key in the Book collection
+
 import axios from "axios";
 import Book from "../models/Book.js";
 
 /**
- * Normalize externalId formats:
- * Accepts "/works/OL82563W", "OL82563W", "/books/OLID:OL123M", "OLID:OL123M" etc.
- * For now we support /works/... and OL works id (OLxxxxxW).
+ * Normalize externalId formats.
+ *
+ * Supported inputs:
+ * - "/works/OL82563W"
+ * - "OL82563W"
+ * - "/books/OL123M"
+ * - "OL123M"
+ *
+ * Canonical form stored in DB:
+ * - "/works/OLxxxxxW" or "/books/OLxxxxxM"
+ *
+ * IMPORTANT:
+ * - This function is central to book deduplication.
+ * - Do not modify lightly without migrating existing data.
  */
 function normalizeExternalId(externalId) {
   if (!externalId) return null;
+
   externalId = externalId.trim();
-  // if already starts with /works/ or /books/ or /works or /books
+
+  // Already a path-like identifier
   if (externalId.startsWith("/")) return externalId;
-  // if plain OL id like OL82563W
+
+  // Plain OpenLibrary IDs
   if (/^OL.*W$/.test(externalId) || /^OL.*M$/.test(externalId)) {
-    // treat W-type as works path
-    if (externalId.endsWith("W")) return `/works/${externalId}`;
+    // Works (W) vs Editions (M)
+    if (externalId.endsWith("W")) {
+      return `/works/${externalId}`;
+    }
     return `/books/${externalId}`;
   }
-  // fallback: return as-is
+
+  // Fallback: return as-is
   return externalId;
 }
 
 /**
- * Fetch book metadata from OpenLibrary for a given externalId
- * externalId should be like "/works/OL82563W" or "/works/OL82563W.json"
+ * Fetch book metadata from OpenLibrary.
+ *
+ * externalId examples:
+ * - "/works/OL82563W"
+ * - "/books/OL123M"
+ *
+ * Notes:
+ * - Uses OpenLibrary JSON endpoints
+ * - Author resolution is best-effort
+ * - Failures return null (caller decides response)
  */
 async function fetchFromOpenLibrary(externalId) {
   try {
     if (!externalId) return null;
-    const id = externalId.replace(/^\/+/, ""); // remove leading slash
-    // prefer works endpoint if it contains "works"
-    let url;
+
+    // Remove leading slash for URL composition
+    const id = externalId.replace(/^\/+/, "");
+
+    // Prefer works endpoint when possible
     if (id.startsWith("works/")) {
-      url = `https://openlibrary.org/${id}.json`;
+      const url = `https://openlibrary.org/${id}.json`;
       const r = await axios.get(url);
       const data = r.data;
 
-      // Try to get a cover (works often reference covers or editions)
+      // Attempt cover extraction
       let cover = null;
       if (data.covers && data.covers.length) {
         cover = `https://covers.openlibrary.org/b/id/${data.covers[0]}-L.jpg`;
       }
 
       const title = data.title || null;
+
+      // Attempt author names directly
       const authors = (data.authors || [])
         .map((a) => a.name || null)
         .filter(Boolean);
 
-      // If authors are references, try fetching names (best-effort)
+      // If authors are references, resolve names best-effort
       if (data.authors && data.authors.length && authors.length === 0) {
-        // fetch author names if author keys are present
         const authorFetches = data.authors.map((a) => {
           const key = a.author ? a.author.key : a.key;
           if (!key) return null;
@@ -59,9 +100,11 @@ async function fetchFromOpenLibrary(externalId) {
             .then((r) => r.data.name)
             .catch(() => null);
         });
+
         const authorNames = await Promise.all(authorFetches);
-        // filter nulls
-        for (const n of authorNames) if (n) authors.push(n);
+        for (const n of authorNames) {
+          if (n) authors.push(n);
+        }
       }
 
       const description =
@@ -80,21 +123,25 @@ async function fetchFromOpenLibrary(externalId) {
         raw: { openlibrary: data, subjects },
         description,
       };
-    } else if (id.startsWith("books/") || id.startsWith("OL")) {
-      // try books (editions) endpoint
-      url = `https://openlibrary.org/${id}.json`;
+    }
+
+    // Editions / books endpoint
+    if (id.startsWith("books/") || id.startsWith("OL")) {
+      const url = `https://openlibrary.org/${id}.json`;
       const r = await axios.get(url);
       const data = r.data;
 
       const title = data.title || data.full_title || null;
+
       const authors =
         (data.authors || [])
           .map((a) => (a.name ? a.name : a.author?.key || null))
           .filter(Boolean) || [];
 
       let cover = null;
-      if (data.covers && data.covers.length)
+      if (data.covers && data.covers.length) {
         cover = `https://covers.openlibrary.org/b/id/${data.covers[0]}-L.jpg`;
+      }
 
       const description =
         (typeof data.description === "string" && data.description) ||
@@ -110,23 +157,30 @@ async function fetchFromOpenLibrary(externalId) {
         raw: { openlibrary: data },
         description,
       };
-    } else {
-      return null;
     }
-  } catch (err) {
-    // don't throw — caller will handle null
+
+    return null;
+  } catch {
+    // External fetch failures are intentionally silent
     return null;
   }
 }
 
 /**
- * Helper: find a Book by externalId in DB or create it using payload
+ * Find a book by externalId or create it if missing.
+ *
+ * Notes:
+ * - Assumes externalId uniqueness at the database level
+ * - In rare concurrent cases, duplicates may occur without a unique index
  */
 async function findOrCreateBook(payload) {
   const { externalId, title, authors, cover, source, raw, description } =
     payload;
+
   const normalized = normalizeExternalId(externalId);
+
   let book = await Book.findOne({ externalId: normalized });
+
   if (!book) {
     book = await Book.create({
       externalId: normalized,
@@ -138,33 +192,45 @@ async function findOrCreateBook(payload) {
       description,
     });
   }
+
   return book;
 }
 
-/* ---------- GET /api/books/:externalId ---------- */
+/* ======================================================
+   GET /api/books/:externalId
+====================================================== */
+
 /**
- * Returns a Book from DB. If not present, tries to fetch from OpenLibrary and store it.
- * Accepts param externalId in forms:
- *  - /works/OL82563W
- *  - OL82563W
- *  - /books/OL123M
+ * Returns a Book from the local DB.
+ * If not found, attempts to fetch from OpenLibrary and persist it.
+ *
+ * Supported externalId formats:
+ * - /works/OL82563W
+ * - OL82563W
+ * - /books/OL123M
  */
 export async function getBook(req, res, next) {
   try {
     const rawId = req.params.externalId;
-    if (!rawId)
+
+    if (!rawId) {
       return res.status(400).json({ message: "externalId required in path" });
+    }
 
     const normalized = normalizeExternalId(rawId);
 
-    // try DB first
-    let book = await Book.findOne({ externalId: normalized });
+    // Attempt DB lookup first
+    let book = await Book.findOne({
+      externalId: normalized,
+    });
+
     if (book) {
       return res.json({ book });
     }
 
-    // try fetching from OpenLibrary
+    // Fallback to OpenLibrary fetch
     const fetched = await fetchFromOpenLibrary(normalized);
+
     if (!fetched) {
       return res.status(404).json({
         message: "Requested book does not exist",
@@ -172,18 +238,27 @@ export async function getBook(req, res, next) {
       });
     }
 
-    // save and return
     book = await findOrCreateBook(fetched);
-    return res.status(201).json({ book, fetched: true });
+
+    return res.status(201).json({
+      book,
+      fetched: true,
+    });
   } catch (err) {
     next(err);
   }
 }
 
-/* ---------- GET /api/books ---------- */
+/* ======================================================
+   GET /api/books
+====================================================== */
+
 /**
- * List recent books stored in DB
- * Query params: page (default 1), limit (default 20)
+ * List recent books stored in the database.
+ *
+ * Notes:
+ * - Intended for admin/debug usage
+ * - Not a discovery or search endpoint
  */
 export async function listBooks(req, res, next) {
   try {
@@ -195,7 +270,9 @@ export async function listBooks(req, res, next) {
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit);
+
     const total = await Book.countDocuments();
+
     res.json({ page, limit, total, docs });
   } catch (err) {
     next(err);
